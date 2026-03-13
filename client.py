@@ -129,9 +129,6 @@ def receive_messages(sock: socket.socket, stop_event: threading.Event):
                 # 3. 播放
                 play_audio(recv_file)
                 
-                # 4. 用后即焚
-                if os.path.exists(recv_file):
-                    os.remove(recv_file)
             else:
                 # 不是语音，那就当做普通文字打印
                 print(f"\r{message}")
@@ -212,7 +209,7 @@ def start_client():
                 continue
 
             # ---- 处理录音指令 ----
-            if msg.lower() == "/voice":
+            if "/voice" in msg.lower():
                 record_audio()  # 录制音频成 wav 格式临时文件
                 
                 # 读出生成的 wav 文件的二进制内容
@@ -223,16 +220,9 @@ def start_client():
                 b64_string = base64.b64encode(wav_content).decode(ENCODING) # 先返回 bytes，再解码成字符串，准备发送
                 
                 # 在前面加上标识符 "AUDIO:"
-                audio_msg = f"AUDIO:{b64_string}"  # string has member function encode() but bytes doesn't, could receive para like "utf-8" or "ascii" to specify how to encode the string into bytes
+                msg = f"{msg.split(sep = '/voice')[0]}AUDIO:{b64_string}"  # string has member function encode() but bytes doesn't, could receive para like "utf-8" or "ascii" to specify how to encode the string into bytes
+            
                 
-                # 发送给服务端的必定还是 bytes
-                client_sock.sendall(audio_msg.encode(ENCODING))
-                
-                # 发完以后把本地的清理掉
-                if os.path.exists(TEMP_WAV_FILE):
-                    os.remove(TEMP_WAV_FILE)
-                continue
-
             # 普通文本消息，直接发
             client_sock.sendall(msg.encode(ENCODING))
 
