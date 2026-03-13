@@ -22,7 +22,7 @@ from datetime import datetime
 # ============ 配置 ============
 HOST = "0.0.0.0"  # 监听所有网卡，局域网内其他主机可连接
 PORT = 9999       # 服务端口号，客户端需要连接此端口
-BUFFER_SIZE = 4096
+BUFFER_SIZE = 1024 * 1024 # 扩大到 1MB，否则装不下 Base64 的音频长字符串
 ENCODING = "utf-8"
 
 # ============ 全局状态 ============
@@ -35,6 +35,7 @@ def timestamp() -> str:
     return datetime.now().strftime("%H:%M:%S")
 
 
+# 进来时调用， 离开时调用，普通消息发送 时调用
 def broadcast(message: str, sender_socket: socket.socket = None):
     """
     广播消息给所有在线客户端（可排除发送者自身）
@@ -45,7 +46,7 @@ def broadcast(message: str, sender_socket: socket.socket = None):
     """
     data = message.encode(ENCODING)
     with clients_lock:
-        for client_sock in list(clients.keys()):
+        for client_sock in list(clients.keys()): # 遍历的对象的类型是socket.socket
             if client_sock == sender_socket:
                 continue
             try:
@@ -54,7 +55,7 @@ def broadcast(message: str, sender_socket: socket.socket = None):
                 # 发送失败说明连接已断开，移除该客户端
                 remove_client(client_sock)
 
-
+# 发送失败说明连接已断开，移除客户端连接 / 在客户离开聊天室时调用，
 def remove_client(client_sock: socket.socket):
     """安全移除一个客户端连接"""
     username = clients.pop(client_sock, None)
@@ -81,10 +82,10 @@ def handle_client(client_sock: socket.socket, addr: tuple):
     username = None
     try:
         # ---- 第一步：接收用户名 ----
-        raw = client_sock.recv(BUFFER_SIZE)
+        raw = client_sock.recv(BUFFER_SIZE) # 这里是不是阻塞了？ 是的，recv() 是一个阻塞调用，如果客户端没有发送数据，服务器线程会在这里等待，直到收到数据或者连接断开。有超时机制吗？没有设置超时，所以如果客户端连接后不发送用户名，服务器线程会一直阻塞在这里。可以考虑设置 socket 超时来避免这种情况，但目前代码中没有实现这一点。
         if not raw:
             client_sock.close()
-            return
+            return  
 
         username = raw.decode(ENCODING).strip()
         with clients_lock:
@@ -104,7 +105,7 @@ def handle_client(client_sock: socket.socket, addr: tuple):
 
         # ---- 第二步：循环接收并广播消息 ----
         while True:
-            data = client_sock.recv(BUFFER_SIZE)
+            data = client_sock.recv(BUFFER_SIZE) # 这里也是阻塞的，recv() 会等待客户端发送消息或者断开连接。如果客户端断开连接，recv() 会返回空数据，这时服务器线程会跳出循环进行清理。
             if not data:
                 break  # 客户端断开连接
 
@@ -159,7 +160,7 @@ def start_server():
     # SO_REUSEADDR 允许端口复用，避免服务器重启时 "Address already in use"
     server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
-    # 绑定到指定地址和端口
+    # 绑定到指定地址和端口 bind 中文意思是绑定，服务器需要绑定一个地址和端口来监听客户端连接请求
     server_sock.bind((HOST, PORT))
 
     # 开始监听，backlog=5 表示最多排队 5 个未处理的连接请求
@@ -174,14 +175,23 @@ def start_server():
     print(f"  客户端请连接 → {local_ip}:{PORT}")
     print("=" * 50)
 
+    # 设置超时时间，解决 Windows 下 accept() 阻塞导致无法响应 Ctrl+C 的问题
+    server_sock.settimeout(1.0)
+
     try:
         while True:
-            # accept() 阻塞等待新的客户端连接
-            client_sock, addr = server_sock.accept()
+            try:
+                # accept() 每 1 秒会引发一次 timeout 异常
+                client_sock, addr = server_sock.accept()
+            except socket.timeout:
+                # 如果是超时，说明这一秒内没人连接，继续下一轮循环
+                # 在这个时候如果用户按了 Ctrl+C，Python 就能捕获到了
+                continue
 
+            # addr 是一个元组 (ip, port)，e.g. ("192.168.1.5", 54321)
             # 为每个客户端创建守护线程
             thread = threading.Thread(
-                target=handle_client,
+                target=handle_client, # 调用处理客户端的函数
                 args=(client_sock, addr),
                 daemon=True  # 守护线程：主线程退出时自动终止
             )
