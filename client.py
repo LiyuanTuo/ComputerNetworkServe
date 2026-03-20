@@ -45,10 +45,10 @@ def receive_messages(sock: socket.socket, stop_event: threading.Event):
             
             # --- 核心：协议解析 ---
             # 判断接收的字符串里有没有我们定义的音频标头 `AUDIO:`
-            if ": AUDIO:" in message:
+            if "AUDIO:" in message:
                 # 字符串长这样： "[14:20:30] 张三: AUDIO:UklGR...="
                 # 分割为头部和音频 Base64 数据
-                prefix, b64_audio = message.split(": AUDIO:", 1)
+                prefix, b64_audio = message.split("AUDIO:", 1)
                 print(f"\r{prefix} 发送了一段语音消息，正在播放...")
                 
                 # 1. 还原：将 Base64 文本解码回原本生成的 Wav 二进制流
@@ -150,9 +150,10 @@ def start_client():
                 b64_string = base64.b64encode(wav_content).decode(ENCODING) # 先返回 bytes，再解码成字符串，准备发送
                 
                 # 在前面加上标识符 "AUDIO:"
+                # @tuoliyuan /voice 
                 msg = f"{msg.split(sep = '/voice')[0]}AUDIO:{b64_string}"  # string has member function encode() but bytes doesn't, could receive para like "utf-8" or "ascii" to specify how to encode the string into bytes
-            
-                
+                # become    @tuoliyuan AUDIO:xxxxxx
+
             # 普通文本消息，直接发
             client_sock.sendall(msg.encode(ENCODING))
 

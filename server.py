@@ -32,6 +32,10 @@ active_calls: dict = {}                  # {用户名: (对方用户名, udp_soc
 active_calls_lock = threading.Lock()
 
 
+logs = []                                # 存储日志，应该是列表类型
+logs_lock = threading.Lock()             # 日志锁，保护 logs 列表
+
+
 def timestamp() -> str:
     """返回当前时间字符串，用于消息前缀"""
     return datetime.now().strftime("%H:%M:%S")
@@ -302,11 +306,18 @@ def handle_client(client_sock: socket.socket, addr: tuple):
         with clients_lock:
             clients[client_sock] = username
 
-        print(f"[{timestamp()}] 用户 '{username}' 已连接 ({addr[0]}:{addr[1]})")
 
         # 通知所有人有新用户上线
         join_msg = f"[{timestamp()}] >>> '{username}' 加入了聊天室 <<<"
         broadcast(join_msg)
+
+        with logs_lock:
+            logs.append({
+                "timestamp": timestamp(),
+                "event": "user join",
+                "username": username
+            })
+
 
         # 给新用户发送欢迎消息和在线列表
         with clients_lock:
@@ -351,17 +362,15 @@ def handle_client(client_sock: socket.socket, addr: tuple):
                     # 给目标直接做系统级别中继下发
                     privatecast(f"\\TCP_VOICE_FROM @{username} {voice_data}", target_name, client_sock)
             elif text[0] == '@':
-                # 私聊消息
-                target_name = text.split(sep=' ')[0][1:]  # @username
-                formatted = f"[{timestamp()}] {username}: {text.split(sep=' ')[1]}"
-                print(formatted)  # 服务器控制台也打印
+                # become    @tuoliyuan AUDIO:xxxxxx
+                target_name = text.split(sep=' ')[0][1:]  # targetname = tuoliyuan
+                formatted = f"[{timestamp()}] {username}: {text.split(sep=' ')[1]}" # text.split(sep=' ')[1] = AUDIO:xxxxxx
                 # 提取目标用户名
                 privatecast(formatted, target_name, sender_socket=client_sock)
 
             else:
                 # 普通消息 → 广播给其他客户端
                 formatted = f"[{timestamp()}] {username}: {text}"
-                print(formatted)  # 服务器控制台也打印
                 broadcast(formatted, sender_socket=client_sock)
 
     except ConnectionResetError:
@@ -376,8 +385,13 @@ def handle_client(client_sock: socket.socket, addr: tuple):
             username = remove_client(client_sock)
         if username:
             leave_msg = f"[{timestamp()}] >>> '{username}' 离开了聊天室 <<<"
-            print(leave_msg)
             broadcast(leave_msg)
+            with logs_lock:
+                logs.append({
+                    "timestamp": timestamp(),
+                    "event": "user leave",
+                    "username": username
+                })
 
 
 def start_server():
@@ -447,11 +461,13 @@ def start_server():
         server_sock.close()
         print("[服务器] 已关闭")
 
+        with logs_lock:
+            with open("logs.jsonl", "a", encoding=ENCODING) as f: # 改后缀为 .jsonl 区分
+                for entry in logs:
+                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            print(f"[系统] 已追加 {len(logs)} 条新记录")
 
 
 if __name__ == "__main__":
-    # load log
-    with open("log.json", "r", encoding=ENCODING) as f:
-        logs = json.load(f)
         
     start_server()
