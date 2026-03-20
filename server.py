@@ -28,6 +28,8 @@ ENCODING = "utf-8"
 # ============ 全局状态 ============
 clients: dict[socket.socket, str] = {}   # {socket对象: 用户名}
 clients_lock = threading.Lock()          # 线程锁，保护 clients 字典
+active_calls: dict = {}                  # {用户名: (对方用户名, udp_socket)}
+active_calls_lock = threading.Lock()
 
 
 def timestamp() -> str:
@@ -88,6 +90,193 @@ def remove_client(client_sock: socket.socket):
     return username
 
 
+def inform_tcp_fallback(user1: str, user2: str):
+    fallback_msg = f"[{timestamp()}] [系统] UDP 探测超时/被阻断，正自动降级为 TCP 语音中继模式！\n"
+    with clients_lock:
+        sock1 = next((s for s, u in clients.items() if u == user1), None)
+        sock2 = next((s for s, u in clients.items() if u == user2), None)
+        
+    if sock1:
+        try: sock1.sendall(fallback_msg.encode(ENCODING))
+        except: pass
+    if sock2:
+        try: sock2.sendall(fallback_msg.encode(ENCODING))
+        except: pass
+
+
+def udp_voice_relay(udp_sock: socket.socket, user1: str, user2: str):
+    """
+    负责在两个客户端之间转发 UDP 语音包的线程
+    由于不知道客户端的确切发包端口，采用"记录前两个不同的发送方地址"的策略，
+    将收到的包相互转发实现 P2P 代理
+    """
+    addr1 = None
+    addr2 = None
+    fallback_triggered = False
+    
+    # 增加心跳探测机制：开头 5 秒钟内如果没有收到双方的 UDP 包，则认为被阻断
+    udp_sock.settimeout(5.0) 
+    
+    try:
+        while True:
+            try:
+                data, addr = udp_sock.recvfrom(4096)
+            except socket.timeout:
+                # 触发了 5 秒超时，且双方/单方连不上，则启动 TCP 降级
+                if not addr1 or not addr2:
+                    fallback_triggered = True
+                    break
+                else:
+                    break   # 长久不说话导致的常规长超时断开
+                
+            if addr == addr1:
+                if addr2:
+                    udp_sock.sendto(data, addr2)
+            elif addr == addr2:
+                if addr1:
+                    udp_sock.sendto(data, addr1)
+            else:
+                if not addr1:
+                    addr1 = addr
+                elif not addr2 and addr != addr1:
+                    addr2 = addr
+                    
+                # 如果此时两端都已确认，网络打通！恢复300秒保活长超时
+                if addr1 and addr2:
+                    udp_sock.settimeout(300.0)
+                    
+                # 立即转发首包给对方
+                if addr == addr1 and addr2:
+                    udp_sock.sendto(data, addr2)
+                elif addr == addr2 and addr1:
+                    udp_sock.sendto(data, addr1)
+    except OSError:
+        pass
+    finally:
+        udp_sock.close()
+        
+        # 根据是否激发了防火墙降级，重置当前通讯模式为 TCP 面向对象
+        if fallback_triggered:
+            inform_tcp_fallback(user1, user2)
+            with active_calls_lock:
+                if user1 in active_calls and active_calls[user1][1] == udp_sock:
+                    active_calls[user1] = (user2, "TCP_MODE")
+                if user2 in active_calls and active_calls[user2][1] == udp_sock:
+                    active_calls[user2] = (user1, "TCP_MODE")
+        else:
+            # 正常清场
+            with active_calls_lock:
+                if user1 in active_calls and active_calls[user1][1] == udp_sock:
+                    del active_calls[user1]
+                if user2 in active_calls and active_calls[user2][1] == udp_sock:
+                    del active_calls[user2]
+
+
+def end_realtime_voice(username: str, initiator: str = None):
+    """
+    终止实时语音通话并通知双方
+    """
+    with active_calls_lock:
+        if username not in active_calls:
+            return
+        
+        peer_name, relay_status = active_calls[username]
+        # 从记录中移除双方
+        del active_calls[username]
+        if peer_name in active_calls:
+            del active_calls[peer_name]
+            
+    # 如果还在 UDP 通道状态，则关闭 socket。如果是 TCP 降级通道那就不用关
+    if isinstance(relay_status, socket.socket):
+        try:
+            relay_status.close()
+        except Exception:
+            pass
+            
+    # 通过 TCP 消息通知两端
+    with clients_lock:
+        # 获取最新的 socket 实例，因为可能会有重连或其他情况
+        peer_sock = None
+        initiator_sock = None
+        for sock, name in clients.items():
+            if name == peer_name:
+                peer_sock = sock
+            if name == initiator:
+                initiator_sock = sock
+
+    if peer_sock:
+        try:
+            peer_sock.sendall(f"\n[{timestamp()}] [系统] 实时语音通话已被 {'对方' if initiator else '系统'} 终止。\n".encode(ENCODING))
+        except Exception:
+            pass
+            
+    if initiator_sock and initiator == username:
+        try:
+            initiator_sock.sendall(f"\n[{timestamp()}] [系统] 您已成功终止实时语音通话。\n".encode(ENCODING))
+        except Exception:
+            pass
+
+
+def start_realtime_voice(caller_name: str, target_name: str, caller_sock: socket.socket):
+    """
+    处理实时语音请求：分配UDP端口并通知双方
+    """
+    if caller_name == target_name:
+        caller_sock.sendall(f"[{timestamp()}] [系统] 不能和自己建立语音。\n".encode(ENCODING))
+        return
+
+    with active_calls_lock:
+        if caller_name in active_calls:
+            caller_sock.sendall(f"[{timestamp()}] [系统] 您当前正在通话中，请先结束当前通话 (\RealTime -quit)。\n".encode(ENCODING))
+            return
+        if target_name in active_calls:
+            caller_sock.sendall(f"[{timestamp()}] [系统] 目标用户 '{target_name}' 正在通话中。\n".encode(ENCODING))
+            return
+
+    target_sock = None
+    # 在clients_lock 表中找到目标client的socket
+    with clients_lock:
+        for sock, name in clients.items():
+            if name == target_name:
+                target_sock = sock
+                break
+                
+    if not target_sock:
+        caller_sock.sendall(f"[{timestamp()}] [系统] 目标用户 '{target_name}' 不存在或未在线。\n".encode(ENCODING))
+        return
+
+    # 创建一个新的 UDP socket 用于此会话的转发
+    relay_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    relay_sock.bind((HOST, 0)) # 0 表示让系统自动分配可用端口
+    relay_port = relay_sock.getsockname()[1]
+
+    # 将此次通话进行登记以供后续查询或强制结束
+    with active_calls_lock:
+        active_calls[caller_name] = (target_name, relay_sock)
+        active_calls[target_name] = (caller_name, relay_sock)
+
+    # 启动 UDP 转发线程
+    t = threading.Thread(
+        target=udp_voice_relay,
+        args=(relay_sock, caller_name, target_name),
+        daemon=True
+    )
+    t.start()
+
+    # 通知双方 UDP 端口
+    msg_to_caller = f"[{timestamp()}] [系统] 正在与 '{target_name}' 建立实时语音。请向服务器 UDP 端口 {relay_port} 发送/接收语音。\n"
+    msg_to_target = f"[{timestamp()}] [系统] '{caller_name}' 向您发起实时语音！请向服务器 UDP 端口 {relay_port} 发送/接收语音。\n"
+    
+    try:
+        caller_sock.sendall(msg_to_caller.encode(ENCODING))
+    except Exception: 
+        pass
+    try:
+        target_sock.sendall(msg_to_target.encode(ENCODING))
+    except Exception: 
+        pass
+
+
 def handle_client(client_sock: socket.socket, addr: tuple):
     """
     处理单个客户端的线程函数
@@ -144,6 +333,23 @@ def handle_client(client_sock: socket.socket, addr: tuple):
                 )
             elif text.lower() == "/quit":
                 break
+            elif text.lower() == r"\realtime -quit" or text.lower() == r"\realttime -quit":
+                # 主动结束当前的实时语音
+                end_realtime_voice(username, initiator=username)
+            elif text.lower().startswith("\\realttime @") or text.lower().startswith("\\realtime @"):
+                # 处理实时点对点语音请求 "\RealTtime @ C2" 或 "\RealTime @ C2"
+                parts = text.split('@', 1)
+                if len(parts) == 2:
+                    target_name = parts[1].strip()
+                    start_realtime_voice(username, target_name, client_sock)
+            elif text.lower().startswith("\\tcp_voice @"):
+                # 接收降级后的音频数据：\TCP_VOICE @对方名字 payload二进制
+                parts = text.split(' ', 2)
+                if len(parts) >= 3:
+                    target_name = parts[1][1:] # 移除@
+                    voice_data = parts[2]
+                    # 给目标直接做系统级别中继下发
+                    privatecast(f"\\TCP_VOICE_FROM @{username} {voice_data}", target_name, client_sock)
             elif text[0] == '@':
                 # 私聊消息
                 target_name = text.split(sep=' ')[0][1:]  # @username
@@ -163,6 +369,8 @@ def handle_client(client_sock: socket.socket, addr: tuple):
     except Exception as e:
         print(f"[错误] 处理客户端 {addr} 时出错: {e}")
     finally:
+        # 确保突发断开时自动关闭语音通话
+        end_realtime_voice(username)
         # ---- 第三步：清理 ----
         with clients_lock:
             username = remove_client(client_sock)
