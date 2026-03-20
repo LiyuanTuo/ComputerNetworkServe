@@ -231,7 +231,7 @@ def start_realtime_voice(caller_name: str, target_name: str, caller_sock: socket
 
     with active_calls_lock:
         if caller_name in active_calls:
-            caller_sock.sendall(f"[{timestamp()}] [系统] 您当前正在通话中，请先结束当前通话 (\RealTime -quit)。\n".encode(ENCODING))
+            caller_sock.sendall(f"[{timestamp()}] [系统] 您当前正在通话中，请先结束当前通话 (/RealTime -quit)。\n".encode(ENCODING))
             return
         if target_name in active_calls:
             caller_sock.sendall(f"[{timestamp()}] [系统] 目标用户 '{target_name}' 正在通话中。\n".encode(ENCODING))
@@ -344,11 +344,11 @@ def handle_client(client_sock: socket.socket, addr: tuple):
                 )
             elif text.lower() == "/quit":
                 break
-            elif text.lower() == r"\realtime -quit" or text.lower() == r"\realttime -quit":
+            elif text.lower() == "/realtime -quit" or text.lower() == "/realttime -quit":
                 # 主动结束当前的实时语音
                 end_realtime_voice(username, initiator=username)
-            elif text.lower().startswith("\\realttime @") or text.lower().startswith("\\realtime @"):
-                # 处理实时点对点语音请求 "\RealTtime @ C2" 或 "\RealTime @ C2"
+            elif text.lower().startswith("/realttime @") or text.lower().startswith("/realtime @"):
+                # 处理实时点对点语音请求 "/RealTtime @ C2" 或 "/RealTime @ C2"
                 parts = text.split('@', 1)
                 if len(parts) == 2:
                     target_name = parts[1].strip()
