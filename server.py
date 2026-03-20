@@ -56,7 +56,7 @@ def broadcast(message: str, sender_socket: socket.socket = None):
                 remove_client(client_sock)
 
 
-def pricatecast(message: str, target_name: str, sender_socket: socket.socket):
+def privatecast(message: str, target_name: str, sender_socket: socket.socket):
     """
     私聊消息发送给指定用户
 
@@ -150,7 +150,7 @@ def handle_client(client_sock: socket.socket, addr: tuple):
                 formatted = f"[{timestamp()}] {username}: {text.split(sep=' ')[1]}"
                 print(formatted)  # 服务器控制台也打印
                 # 提取目标用户名
-                pricatecast(formatted, target_name, sender_socket=client_sock)
+                privatecast(formatted, target_name, sender_socket=client_sock)
 
             else:
                 # 普通消息 → 广播给其他客户端
