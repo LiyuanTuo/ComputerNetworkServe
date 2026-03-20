@@ -55,6 +55,28 @@ def broadcast(message: str, sender_socket: socket.socket = None):
                 # 发送失败说明连接已断开，移除该客户端
                 remove_client(client_sock)
 
+
+def pricatecast(message: str, target_name: str, sender_socket: socket.socket):
+    """
+    私聊消息发送给指定用户
+
+    参数:
+        message:        要发送的消息文本
+        target_name:    目标用户名
+        sender_socket:  发送者的 socket，用于排除自己
+    """
+    data = message.encode(ENCODING)
+    with clients_lock:
+        for client_sock, username in clients.items():
+            if username == target_name and client_sock != sender_socket:
+                try:
+                    client_sock.sendall(data)
+                except Exception:
+                    # 发送失败说明连接已断开，移除该客户端
+                    remove_client(client_sock)
+                break  # 找到目标用户后就退出循环
+
+
 # 发送失败说明连接已断开，移除客户端连接 / 在客户离开聊天室时调用，
 def remove_client(client_sock: socket.socket):
     """安全移除一个客户端连接"""
@@ -109,7 +131,7 @@ def handle_client(client_sock: socket.socket, addr: tuple):
             if not data:
                 break  # 客户端断开连接
 
-            text = data.decode(ENCODING).strip()
+            text = data.decode(ENCODING).strip() # decode 是从字节转换成字符串
             if not text:
                 continue
 
@@ -120,15 +142,21 @@ def handle_client(client_sock: socket.socket, addr: tuple):
                 client_sock.sendall(
                     f"[{timestamp()}] 在线用户: {online}\n".encode(ENCODING)
                 )
-                continue
-
-            if text.lower() == "/quit":
+            elif text.lower() == "/quit":
                 break
+            elif text[0] == '@':
+                # 私聊消息
+                target_name = text.split(sep=' ')[0][1:]  # @username
+                formatted = f"[{timestamp()}] {username}: {text.split(sep=' ')[1]}"
+                print(formatted)  # 服务器控制台也打印
+                # 提取目标用户名
+                pricatecast(formatted, target_name, sender_socket=client_sock)
 
-            # 普通消息 → 广播给其他客户端
-            formatted = f"[{timestamp()}] {username}: {text}"
-            print(formatted)  # 服务器控制台也打印
-            broadcast(formatted, sender_socket=client_sock)
+            else:
+                # 普通消息 → 广播给其他客户端
+                formatted = f"[{timestamp()}] {username}: {text}"
+                print(formatted)  # 服务器控制台也打印
+                broadcast(formatted, sender_socket=client_sock)
 
     except ConnectionResetError:
         pass
@@ -212,5 +240,10 @@ def start_server():
         print("[服务器] 已关闭")
 
 
+
 if __name__ == "__main__":
+    # load log
+    with open("log.json", "r", encoding=ENCODING) as f:
+        logs = json.load(f)
+        
     start_server()

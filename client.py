@@ -162,12 +162,9 @@ def start_client():
     print("=" * 50)
 
     # ---- 获取连接信息 ----
-    server_ip = input("请输入服务器 IP 地址 (默认 127.0.0.1): ").strip()
-    if not server_ip:
-        server_ip = "127.0.0.1"
+    server_ip = "DESKTOP-4AFQ0JR" # 使用我的计算机名来作为服务器 就不用担心局域网内 IP 地址变化了 你们要改成你们自己的hostname 或者直接输入局域网 IP 地址
 
-    port_str = input("请输入服务器端口号 (默认 9999): ").strip()
-    port = int(port_str) if port_str else 9999
+    port = 9999
 
     username = input("请输入你的用户名: ").strip()
     if not username:
@@ -209,7 +206,7 @@ def start_client():
                 continue
 
             # ---- 处理录音指令 ----
-            if msg.lower() == "/voice":
+            if "/voice" in msg.lower():
                 record_audio()  # 录制音频成 wav 格式临时文件
                 
                 # 读出生成的 wav 文件的二进制内容
@@ -220,16 +217,9 @@ def start_client():
                 b64_string = base64.b64encode(wav_content).decode(ENCODING) # 先返回 bytes，再解码成字符串，准备发送
                 
                 # 在前面加上标识符 "AUDIO:"
-                audio_msg = f"AUDIO:{b64_string}"  # string has member function encode() but bytes doesn't, could receive para like "utf-8" or "ascii" to specify how to encode the string into bytes
+                msg = f"{msg.split(sep = '/voice')[0]}AUDIO:{b64_string}"  # string has member function encode() but bytes doesn't, could receive para like "utf-8" or "ascii" to specify how to encode the string into bytes
+            
                 
-                # 发送给服务端的必定还是 bytes
-                client_sock.sendall(audio_msg.encode(ENCODING))
-                
-                # 发完以后把本地的清理掉
-                if os.path.exists(TEMP_WAV_FILE):
-                    os.remove(TEMP_WAV_FILE)
-                continue
-
             # 普通文本消息，直接发
             client_sock.sendall(msg.encode(ENCODING))
 
