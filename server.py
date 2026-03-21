@@ -30,6 +30,8 @@ clients: dict[socket.socket, str] = {}   # {socket对象: 用户名}
 clients_lock = threading.Lock()          # 线程锁，保护 clients 字典
 active_calls: dict = {}                  # {用户名: (对方用户名, udp_socket)}
 active_calls_lock = threading.Lock()
+pending_calls: dict = {}                 # 呼叫中状态 {呼叫者: {"target": 被叫者, "sock": udp_sock, "port": udp_port}}
+pending_calls_lock = threading.Lock()
 
 
 logs = []                                # 存储日志，应该是列表类型
@@ -91,15 +93,49 @@ def remove_client(client_sock: socket.socket):
         client_sock.close()
     except Exception:
         pass
+        
+    # 如果用户掉线，清理那些还没接通的呼叫状态
+    if username:
+        with pending_calls_lock:
+            # 他是呼叫者
+            if username in pending_calls:
+                info = pending_calls.pop(username)
+                try: info["sock"].close()
+                except: pass
+            
+            # 他是被叫者
+            to_remove_caller = None
+            for c_name, info in pending_calls.items():
+                if info["target"] == username:
+                    to_remove_caller = c_name
+                    try: info["sock"].close()
+                    except: pass
+                    break
+            if to_remove_caller:
+                del pending_calls[to_remove_caller]
+        
+        # 并帮他清理还在进行的实时语音
+        end_realtime_voice(username)
+
     return username
 
 
 def inform_tcp_fallback(user1: str, user2: str):
     fallback_msg = f"[{timestamp()}] [系统] UDP 探测超时/被阻断，正自动降级为 TCP 语音中继模式！\n"
     with clients_lock:
-        sock1 = next((s for s, u in clients.items() if u == user1), None)
-        sock2 = next((s for s, u in clients.items() if u == user2), None)
-        
+        # 通过用户名找到对应的两个线程
+        sock1 = None
+        for s, u in clients.items():
+            if u == user1:
+                sock1 = s
+                break
+        sock2 = None
+
+        for s, u in clients.items():
+            if u == user2:
+                sock2 = s
+                break
+   
     if sock1:
         try: sock1.sendall(fallback_msg.encode(ENCODING))
         except: pass
@@ -113,20 +149,21 @@ def udp_voice_relay(udp_sock: socket.socket, user1: str, user2: str):
     负责在两个客户端之间转发 UDP 语音包的线程
     由于不知道客户端的确切发包端口，采用"记录前两个不同的发送方地址"的策略，
     将收到的包相互转发实现 P2P 代理
+    能否利用user_log文件中存储的IP信息？
     """
     addr1 = None
     addr2 = None
     fallback_triggered = False
     
-    # 增加心跳探测机制：开头 5 秒钟内如果没有收到双方的 UDP 包，则认为被阻断
-    udp_sock.settimeout(5.0) 
+    # 增加心跳探测机制：开头 7 秒钟内如果没有收到双方的 UDP 包，则认为被阻断
+    udp_sock.settimeout(7.0) 
     
     try:
         while True:
             try:
                 data, addr = udp_sock.recvfrom(4096)
             except socket.timeout:
-                # 触发了 5 秒超时，且双方/单方连不上，则启动 TCP 降级
+                # 触发了 7 秒超时，且双方/单方连不上，则启动 TCP 降级
                 if not addr1 or not addr2:
                     fallback_triggered = True
                     break
@@ -221,9 +258,10 @@ def end_realtime_voice(username: str, initiator: str = None):
             pass
 
 
-def start_realtime_voice(caller_name: str, target_name: str, caller_sock: socket.socket):
+def handle_call_request(caller_name: str, target_name: str, caller_sock: socket.socket):
     """
-    处理实时语音请求：分配UDP端口并通知双方
+    处理实时语音呼叫请求（改进版）
+    不直接接通，而是分配 UDP 端口并通过 TCP 向被呼叫者发请求
     """
     if caller_name == target_name:
         caller_sock.sendall(f"[{timestamp()}] [系统] 不能和自己建立语音。\n".encode(ENCODING))
@@ -233,33 +271,88 @@ def start_realtime_voice(caller_name: str, target_name: str, caller_sock: socket
         if caller_name in active_calls:
             caller_sock.sendall(f"[{timestamp()}] [系统] 您当前正在通话中，请先结束当前通话 (/RealTime -quit)。\n".encode(ENCODING))
             return
-        if target_name in active_calls:
-            caller_sock.sendall(f"[{timestamp()}] [系统] 目标用户 '{target_name}' 正在通话中。\n".encode(ENCODING))
+        if target_name in active_calls: # 您呼叫的用户正忙，请稍后再拨
+            caller_sock.sendall(f"\\CALL_REPLY_FAIL {target_name} 2\n".encode(ENCODING))
+            return
+            
+    with pending_calls_lock:
+        if caller_name in pending_calls:
+            caller_sock.sendall(f"[{timestamp()}] [系统] 您已经在呼叫中，请等待上一呼叫结束或被拒绝。\n".encode(ENCODING))
             return
 
     target_sock = None
-    # 在clients_lock 表中找到目标client的socket
     with clients_lock:
         for sock, name in clients.items():
             if name == target_name:
                 target_sock = sock
                 break
                 
-    if not target_sock:
-        caller_sock.sendall(f"[{timestamp()}] [系统] 目标用户 '{target_name}' 不存在或未在线。\n".encode(ENCODING))
+    if not target_sock: #您呼叫的用户已关机，请稍后再拨
+        caller_sock.sendall(f"\\CALL_REPLY_FAIL {target_name} 1\n".encode(ENCODING))
         return
 
-    # 创建一个新的 UDP socket 用于此会话的转发
+    # 创建一条专用的 UDP 隧道中继
     relay_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    relay_sock.bind((HOST, 0)) # 0 表示让系统自动分配可用端口
+    relay_sock.bind((HOST, 0)) # 0表示服务器随机分配一个端口供udp链接
     relay_port = relay_sock.getsockname()[1]
 
-    # 将此次通话进行登记以供后续查询或强制结束
+    # 将其登入到“等待接听(pending)”列表中
+    with pending_calls_lock:
+        pending_calls[caller_name] = {
+            "target": target_name,
+            "sock": relay_sock, #给target_name和caller_name的中转线程
+            "port": relay_port #给target_name和caller_name的中转端口
+        }
+
+    # 通过 TCP 告诉目标：有人呼叫，你可以往这个 UDP 端口打洞
+    # 消息格式：\CALL_REQUEST caller_name relay_port
+    try:
+        target_sock.sendall(f"\\CALL_REQUEST {caller_name} {relay_port}\n".encode(ENCODING))
+    except Exception:
+        pass
+        
+    try:
+        caller_sock.sendall(f"[{timestamp()}] [系统] 已经向 '{target_name}' 发起语音呼叫，等待对方接听...\n".encode(ENCODING))
+    except Exception: 
+        pass
+
+
+def handle_call_reply(target_name: str, caller_name: str, is_accept: bool, target_sock: socket.socket):
+    """
+    处理被呼叫者的答复 (同意/拒绝)
+    """
+    with pending_calls_lock:
+        if caller_name not in pending_calls:
+            return # 可能呼叫已经超时，或已被撤销
+        call_info = pending_calls.pop(caller_name) #取出呼叫信息
+    
+    relay_sock = call_info["sock"]
+    relay_port = call_info["port"]
+    
+    caller_sock = None
+    # 找寻 caller 的TCP 链接，发送文本信息
+    with clients_lock:
+        for sock, name in clients.items():
+            if name == caller_name:
+                caller_sock = sock
+                break
+
+    if not is_accept:
+        # 目标拒绝
+        relay_sock.close()
+        if caller_sock: #对方拒绝你的语音邀请
+            try: caller_sock.sendall(f"\\CALL_REPLY_FAIL {target_name} 3\n".encode(ENCODING))
+            except: pass
+        if target_sock:
+             try: target_sock.sendall(f"[{timestamp()}] [系统] 已拒绝 '{caller_name}' 的语音邀请。\n".encode(ENCODING))
+             except: pass
+        return
+
+    # 目标同意：建立正式的双向映射，并启动中继线程打通
     with active_calls_lock:
         active_calls[caller_name] = (target_name, relay_sock)
         active_calls[target_name] = (caller_name, relay_sock)
 
-    # 启动 UDP 转发线程
     t = threading.Thread(
         target=udp_voice_relay,
         args=(relay_sock, caller_name, target_name),
@@ -267,18 +360,13 @@ def start_realtime_voice(caller_name: str, target_name: str, caller_sock: socket
     )
     t.start()
 
-    # 通知双方 UDP 端口
-    msg_to_caller = f"[{timestamp()}] [系统] 正在与 '{target_name}' 建立实时语音。请向服务器 UDP 端口 {relay_port} 发送/接收语音。\n"
-    msg_to_target = f"[{timestamp()}] [系统] '{caller_name}' 向您发起实时语音！请向服务器 UDP 端口 {relay_port} 发送/接收语音。\n"
-    
-    try:
-        caller_sock.sendall(msg_to_caller.encode(ENCODING))
-    except Exception: 
-        pass
-    try:
-        target_sock.sendall(msg_to_target.encode(ENCODING))
-    except Exception: 
-        pass
+    # 告诉主叫方：目标已同意接入请求，并且告诉它 UDP 中继端口是多少
+    if caller_sock: 
+        try: caller_sock.sendall(f"\\CALL_REPLY_OK {target_name} {relay_port}\n".encode(ENCODING))
+        except: pass
+    if target_sock:
+        try: target_sock.sendall(f"[{timestamp()}] [系统] 语音已接通，正在建立后台安全通道...\n".encode(ENCODING))
+        except: pass
 
 
 def handle_client(client_sock: socket.socket, addr: tuple):
@@ -347,12 +435,20 @@ def handle_client(client_sock: socket.socket, addr: tuple):
             elif text.lower() == "/realtime -quit" or text.lower() == "/realttime -quit":
                 # 主动结束当前的实时语音
                 end_realtime_voice(username, initiator=username)
-            elif text.lower().startswith("/realttime @") or text.lower().startswith("/realtime @"):
-                # 处理实时点对点语音请求 "/RealTtime @ C2" 或 "/RealTime @ C2"
+            elif text.lower().startswith("/call @") or text.lower().startswith("/realttime @") or text.lower().startswith("/realtime @"):
+                # 处理实时点对点语音请求
                 parts = text.split('@', 1)
                 if len(parts) == 2:
                     target_name = parts[1].strip()
-                    start_realtime_voice(username, target_name, client_sock)
+                    handle_call_request(username, target_name, client_sock)
+            elif text.startswith("\\CALL_ACCEPT "): #接收方同意语音请求
+                parts = text.split(' ', 1)
+                caller_name = parts[1].strip()
+                handle_call_reply(username, caller_name, True, client_sock)
+            elif text.startswith("\\CALL_REJECT "): #接收方拒绝语音请求
+                parts = text.split(' ', 1)
+                caller_name = parts[1].strip()
+                handle_call_reply(username, caller_name, False, client_sock)
             elif text.lower().startswith("\\tcp_voice @"):
                 # 接收降级后的音频数据：\TCP_VOICE @对方名字 payload二进制
                 parts = text.split(' ', 2)
@@ -378,8 +474,6 @@ def handle_client(client_sock: socket.socket, addr: tuple):
     except Exception as e:
         print(f"[错误] 处理客户端 {addr} 时出错: {e}")
     finally:
-        # 确保突发断开时自动关闭语音通话
-        end_realtime_voice(username)
         # ---- 第三步：清理 ----
         with clients_lock:
             username = remove_client(client_sock)

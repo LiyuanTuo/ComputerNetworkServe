@@ -27,9 +27,88 @@ from audio import *
 BUFFER_SIZE = 1024 * 1024 
 ENCODING = "utf-8"
 
+import time
 
+# ==== 实时语音状态控制 ====
+udp_voice_active = False
+udp_voice_socket = None
+current_pending_port = None
 
-def receive_messages(sock: socket.socket, stop_event: threading.Event):
+# Pyaudio 麦克风配置
+CHUNK = 1024
+FORMAT = pyaudio.paInt16
+CHANNELS = 1
+RATE = 16000
+
+def udp_audio_send_thread(udp_sock, server_ip, server_port):
+    global udp_voice_active
+    p = pyaudio.PyAudio()
+    stream = p.open(format=FORMAT,
+                    channels=CHANNELS,
+                    rate=RATE,
+                    input=True,
+                    frames_per_buffer=CHUNK)
+    print("\n[系统] 麦克风已开启，双向语音打通！(输入 /realtime -quit 挂断)")
+    print("你> ", end="", flush=True)
+    try:
+        while udp_voice_active:
+            data = stream.read(CHUNK, exception_on_overflow=False)
+            udp_sock.sendto(data, (server_ip, server_port))
+    except Exception as e:
+        pass
+    finally:
+        stream.stop_stream()
+        stream.close()
+        p.terminate()
+
+def udp_audio_recv_thread(udp_sock):
+    global udp_voice_active
+    p = pyaudio.PyAudio()
+    stream = p.open(format=FORMAT,
+                    channels=CHANNELS,
+                    rate=RATE,
+                    output=True,
+                    frames_per_buffer=CHUNK)
+    try:
+        while udp_voice_active:
+            data, addr = udp_sock.recvfrom(4096)
+            stream.write(data)
+    except Exception as e:
+        pass
+    finally:
+        stream.stop_stream()
+        stream.close()
+        p.terminate()
+
+def start_realtime_audio(server_ip, server_port):
+    global udp_voice_active, udp_voice_socket
+    if udp_voice_active: return
+    
+    udp_voice_active = True
+    udp_voice_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    
+    # 【核心：主动打洞】连发5个空包，将本机局域网后的公网端口暴露给服务器
+    for _ in range(5):
+        udp_voice_socket.sendto(b"HOLE_PUNCH", (server_ip, server_port))
+        time.sleep(0.1)
+
+    t1 = threading.Thread(target=udp_audio_send_thread, args=(udp_voice_socket, server_ip, server_port), daemon=True)
+    t2 = threading.Thread(target=udp_audio_recv_thread, args=(udp_voice_socket,), daemon=True)
+    t1.start()
+    t2.start()
+
+def stop_realtime_audio():
+    global udp_voice_active, udp_voice_socket
+    udp_voice_active = False
+    if udp_voice_socket:
+        try:
+            # 发送一空包打破 recvfrom 阻塞
+            udp_voice_socket.sendto(b"", ("127.0.0.1", udp_voice_socket.getsockname()[1]))
+            udp_voice_socket.close()
+        except: pass
+        udp_voice_socket = None
+
+def receive_messages(sock: socket.socket, stop_event: threading.Event, server_ip: str):
     """
     接收线程：持续从服务器接收消息并处理，包含解析 Base64 音频
     """
@@ -42,6 +121,39 @@ def receive_messages(sock: socket.socket, stop_event: threading.Event):
                 break
             
             message = data.decode(ENCODING)
+            
+            # --- 处理实时语音呼叫信令 ---
+            if message.startswith("\\CALL_REQUEST "):
+                parts = message.split(" ")
+                caller = parts[1]
+                r_port = parts[2].strip()
+                global current_pending_port
+                current_pending_port = int(r_port)
+                
+                print(f"\n\n[系统提示] >>> 用户 '{caller}' 向你发起实时语音通话！ <<<")
+                print(f"请输入 /accept {caller} 接受，或输入 /reject {caller} 拒绝。")
+                print("你> ", end="", flush=True)
+                continue
+                
+            elif message.startswith("\\CALL_REPLY_FAIL "):
+                parts = message.split(" ")
+                target = parts[1]
+                reason = parts[2].strip()
+                reasons = {"1": "不在线", "2": "正在通话中", "3": "拒绝了您的请求"}
+                print(f"\n[系统] 呼叫 '{target}' 失败：{reasons.get(reason, '未知错误')}")
+                print("你> ", end="", flush=True)
+                continue
+                
+            elif message.startswith("\\CALL_REPLY_OK "):
+                parts = message.split(" ")
+                target = parts[1]
+                server_udp_port = int(parts[2].strip())
+                print(f"\n[系统] '{target}' 已接受呼叫！底层 UDP 语音通道打桩中...")
+                print("你> ", end="", flush=True)
+                
+                # 启动底层双向UDP音频收发线程与服务器进行打洞并传输音频
+                start_realtime_audio(server_ip, server_udp_port)
+                continue
             
             # --- 核心：协议解析 ---
             # 判断接收的字符串里有没有我们定义的音频标头 `AUDIO:`
@@ -64,6 +176,8 @@ def receive_messages(sock: socket.socket, stop_event: threading.Event):
                 
             else:
                 # 不是语音，那就当做普通文字打印
+                if "通话已被" in message and "终止" in message:
+                    stop_realtime_audio()
                 print(f"\r{message}")
             
             print("你> ", end="", flush=True)
@@ -124,7 +238,7 @@ def start_client():
     stop_event = threading.Event()
     recv_thread = threading.Thread(
         target=receive_messages,
-        args=(client_sock, stop_event),
+        args=(client_sock, stop_event, server_ip),
         daemon=True
     )
     recv_thread.start()
@@ -153,6 +267,27 @@ def start_client():
                 # @tuoliyuan /voice 
                 msg = f"{msg.split(sep = '/voice')[0]}AUDIO:{b64_string}"  # string has member function encode() but bytes doesn't, could receive para like "utf-8" or "ascii" to specify how to encode the string into bytes
                 # become    @tuoliyuan AUDIO:xxxxxx
+
+            # ---- 处理呼叫答复 ----
+            if msg.startswith("/accept "):
+                caller = msg.split(" ")[1]
+                # 发送同意指令通过 TCP 提给服务器
+                client_sock.sendall(f"\\CALL_ACCEPT {caller}".encode(ENCODING))
+                print(f"[系统] 已同意 {caller} 的接入，正在建立底层 UDP 通讯...")
+                # 启动底层双向UDP音频收发线程与服务器进行打洞并传输音频
+                if current_pending_port is not None:
+                    start_realtime_audio(server_ip, current_pending_port)
+                continue
+                
+            elif msg.startswith("/reject "):
+                caller = msg.split(" ")[1]
+                client_sock.sendall(f"\\CALL_REJECT {caller}".encode(ENCODING))
+                print(f"[系统] 已拒绝 {caller} 的呼叫。")
+                continue
+                
+            elif msg.lower() == "/realtime -quit":
+                stop_realtime_audio()
+                # 会交给服务器去广播结束消息
 
             # 普通文本消息，直接发
             client_sock.sendall(msg.encode(ENCODING))
