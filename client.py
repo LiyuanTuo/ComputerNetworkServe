@@ -70,7 +70,7 @@ def receive_messages(sock: socket.socket, stop_event: threading.Event, server_ip
                 parts = message.split(" ")
                 target = parts[1]
                 server_udp_port = int(parts[2].strip())
-                print(f"\n[系统] '{target}' 已接受呼叫！底层 UDP 语音通道打桩中...")
+                print(f"\n[系统] '{target}' 已接受呼叫！底层 UDP 语音通道打通中...")
                 print("你> ", end="", flush=True)
                 
                 # 启动底层双向UDP音频收发线程与服务器进行打洞并传输音频
