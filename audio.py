@@ -7,6 +7,7 @@ import wave
 import base64
 import os
 import time
+import time
 
 # 音频录制配置参数
 CHUNK = 1024             # 采样块大小

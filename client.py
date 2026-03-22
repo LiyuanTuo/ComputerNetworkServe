@@ -29,6 +29,8 @@ ENCODING = "utf-8"
 
 # ==== 实时语音状态控制 ====
 current_pending_port = None
+# ==== 实时语音状态控制 ====
+current_pending_port = None
 
 def receive_messages(sock: socket.socket, stop_event: threading.Event, server_ip: str):
     """
@@ -43,6 +45,39 @@ def receive_messages(sock: socket.socket, stop_event: threading.Event, server_ip
                 break
             
             message = data.decode(ENCODING)
+            
+            # --- 处理实时语音呼叫信令 ---
+            if message.startswith("\\CALL_REQUEST "):
+                parts = message.split(" ")
+                caller = parts[1]
+                r_port = parts[2].strip()
+                global current_pending_port
+                current_pending_port = int(r_port)
+                
+                print(f"\n\n[系统提示] >>> 用户 '{caller}' 向你发起实时语音通话！ <<<")
+                print(f"请输入 /accept {caller} 接受，或输入 /reject {caller} 拒绝。")
+                print("你> ", end="", flush=True)
+                continue
+                
+            elif message.startswith("\\CALL_REPLY_FAIL "):
+                parts = message.split(" ")
+                target = parts[1]
+                reason = parts[2].strip()
+                reasons = {"1": "不在线", "2": "正在通话中", "3": "拒绝了您的请求"}
+                print(f"\n[系统] 呼叫 '{target}' 失败：{reasons.get(reason, '未知错误')}")
+                print("你> ", end="", flush=True)
+                continue
+                
+            elif message.startswith("\\CALL_REPLY_OK "):
+                parts = message.split(" ")
+                target = parts[1]
+                server_udp_port = int(parts[2].strip())
+                print(f"\n[系统] '{target}' 已接受呼叫！底层 UDP 语音通道打通中...")
+                print("你> ", end="", flush=True)
+                
+                # 启动底层双向UDP音频收发线程与服务器进行打洞并传输音频
+                start_realtime_audio(server_ip, server_udp_port)
+                continue
             
             # --- 处理实时语音呼叫信令 ---
             if message.startswith("\\CALL_REQUEST "):
@@ -98,6 +133,8 @@ def receive_messages(sock: socket.socket, stop_event: threading.Event, server_ip
                 
             else:
                 # 不是语音，那就当做普通文字打印
+                if "通话已被" in message and "终止" in message:
+                    stop_realtime_audio()
                 if "通话已被" in message and "终止" in message:
                     stop_realtime_audio()
                 print(f"\r{message}")

@@ -460,7 +460,7 @@ def handle_client(client_sock: socket.socket, addr: tuple):
             elif text[0] == '@':
                 # become    @tuoliyuan AUDIO:xxxxxx
                 target_name = text.split(sep=' ')[0][1:]  # targetname = tuoliyuan
-                formatted = f"[{timestamp()}] {username}: {text.split(sep=' ')[1]}" # text.split(sep=' ')[1] = AUDIO:xxxxxx
+                formatted = f"[{timestamp()}] {username}: {text.split(sep=' ')[1]}" # text.split(sep=' ')[1] = "AUDIO:xxxxxx"
                 # 提取目标用户名
                 privatecast(formatted, target_name, sender_socket=client_sock)
 
