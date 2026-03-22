@@ -20,7 +20,7 @@ def record_audio():
     """
     采集麦克风音频，并保存为本地的 .wav 临时文件
     """
-    p = pyaudio.PyAudio()
+    p = get_pyaudio()
     print(f"\n[系统] 开始录音，时长 {RECORD_SECONDS} 秒...")
     
     stream = p.open(format=FORMAT,
@@ -38,7 +38,7 @@ def record_audio():
     print("[系统] 录音结束。")
     stream.stop_stream()
     stream.close()
-    p.terminate()
+    # p.terminate()
 
     # 使用 wave 库，将刚刚录制的 raw 字节流打包成标准的 wav 文件
     wf = wave.open(TEMP_WAV_FILE, 'wb')
@@ -56,7 +56,7 @@ def play_audio(filename):
     """
     try:
         wf = wave.open(filename, 'rb')
-        p = pyaudio.PyAudio()
+        p = get_pyaudio()
         
         # 根据读取出的文件头信息，设定播音流的参数
         stream = p.open(format=p.get_format_from_width(wf.getsampwidth()),
@@ -71,7 +71,7 @@ def play_audio(filename):
 
         stream.stop_stream()
         stream.close()
-        p.terminate()
+        # p.terminate()
         wf.close()
     except Exception as e:
         print(f"\n[系统] 播放音频失败: {e}")
@@ -83,18 +83,24 @@ udp_voice_active = False
 udp_voice_socket = None
 VOICE_RATE = 16000  # 实时语音优化采样率
 
-# client端的采集语音并发送
+
+# 全局 Pyaudio 对象，避免在多个线程中同时初始化导致 C 语言层面发生 Segfault 卡退
+_pyaudio_instance = None
+_pyaudio_lock = threading.Lock()
+
+def get_pyaudio():
+    global _pyaudio_instance
+    with _pyaudio_lock:
+        if _pyaudio_instance is None:
+            _pyaudio_instance = pyaudio.PyAudio()
+        return _pyaudio_instance
+
 def udp_audio_send_thread(udp_sock, server_ip, server_port):
     """
     实时语音发送线程：负责采集本地麦克风的声音并实时发送给服务器。
-    
-    参数：
-      - udp_sock: 已建立的 UDP Socket 对象
-      - server_ip: 服务器的 IP 地址
-      - server_port: 服务器动态分配给本次通话的中继 UDP 端口
     """
     global udp_voice_active
-    p = pyaudio.PyAudio()
+    p = get_pyaudio()
     
     # 开启麦克风输入流，采样率为专门的 VOICE_RATE (16000)
     stream = p.open(format=FORMAT,
@@ -112,14 +118,16 @@ def udp_audio_send_thread(udp_sock, server_ip, server_port):
             # 通过 UDP socket 直接扔向服务器，延迟极低
             udp_sock.sendto(data, (server_ip, server_port))
     except Exception as e:
+        # print(f"\\n[发送线程异常] {e}")
         pass
     finally:
         # 退出循环后安全释放声卡及流资源
         stream.stop_stream()
         stream.close()
-        p.terminate()
+        # 注意：使用全局 _pyaudio_instance 后，就不要终止它了
+        # p.terminate()
 
-#client端的接收语音并播放
+
 def udp_audio_recv_thread(udp_sock):
     """
     实时语音接收线程：负责从网络接收对方的音频数据并输出到本地扬声器。
@@ -128,7 +136,7 @@ def udp_audio_recv_thread(udp_sock):
       - udp_sock: 用于接收数据的 UDP Socket 对象，绑定本地端口
     """
     global udp_voice_active
-    p = pyaudio.PyAudio()
+    p = get_pyaudio()
     
     # 开启扬声器输出流
     stream = p.open(format=FORMAT,
@@ -140,16 +148,20 @@ def udp_audio_recv_thread(udp_sock):
         while udp_voice_active:
             # 阻塞等待网络端传来的音频包 (最大缓冲 4096 字节)
             data, addr = udp_sock.recvfrom(4096)
+            # 过滤掉由于打洞产生的 HOLE_PUNCH 包以及非正常大小的包
+            if data == b"HOLE_PUNCH" or len(data) == 0:
+                continue
             # 接收到音频数据后，直接写入扬声器播放发声
             stream.write(data)
     except Exception as e:
-        # 当 Socket 被外部关闭导致抛出异常时，直接捕获并退出
+        # 调试排错输出
+        # print(f"\\n[接收线程异常] {e}")
         pass
     finally:
         # 退出流与声卡资源
         stream.stop_stream()
         stream.close()
-        p.terminate()
+        # p.terminate()
 
 def start_realtime_audio(server_ip, server_port):
     """

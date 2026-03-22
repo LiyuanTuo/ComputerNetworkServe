@@ -131,8 +131,8 @@ def start_client():
     print("=" * 50)
 
     # ---- 获取连接信息 ----
-    server_ip = "DESKTOP-4AFQ0JR" # 使用我的计算机名来作为服务器 就不用担心局域网内 IP 地址变化了 你们要改成你们自己的hostname 或者直接输入局域网 IP 地址
-
+    #server_ip = "DESKTOP-4AFQ0JR" # 使用我的计算机名来作为服务器 就不用担心局域网内 IP 地址变化了 你们要改成你们自己的hostname 或者直接输入局域网 IP 地址
+    server_ip = "10.198.4.172" #蒋利伟主机名"desktop_m2mi6se8"
     port = 9999
 
     username = input("请输入你的用户名: ").strip()
@@ -166,7 +166,7 @@ def start_client():
     recv_thread.start()
 
     # ---- 主线程：发送消息 ----
-    print("提示: 输入文字回车发送 | 输入 /voice 录制发送语音留言 | /quit 退出\n")
+    print("提示: 输入文字回车发送 | 输入 /voice 录制发送语音留言 | 输入 /call @用户名 发起实时语音 | /quit 退出\n")
     try:
         while not stop_event.is_set():
             print("你> ", end="", flush=True)
