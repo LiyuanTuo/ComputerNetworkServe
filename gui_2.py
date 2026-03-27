@@ -292,7 +292,8 @@ class VoiceChatApp:
             for widget in [inner, row]:
                 widget.bind("<Button-1>", lambda e, n=name: self.select_contact(n))
 
-        self.selected_contact = None
+        # 刷新 UI 后恢复高亮
+        self._highlight_selected()
 
     def select_contact(self, name):
         """选中一个联系人（UI 高亮 + 记住选择）"""
@@ -301,17 +302,24 @@ class VoiceChatApp:
         self._highlight_selected()
 
     def _highlight_selected(self):
-        """遍历联系人行，给选中的加边框"""
+        """遍历联系人行，给选中的加边框，未选中的取消边框"""
         for row in self.contacts_inner.winfo_children():
             for inner in row.winfo_children():
                 if isinstance(inner, tk.Frame):
                     # 检查 inner 里的 Label 文字
+                    is_selected = False
                     for child in inner.winfo_children():
                         if isinstance(child, tk.Label):
                             if child.cget("text") == getattr(self, "selected_contact", None):
-                                inner.configure(highlightbackground=COLORS["accent"],
-                                                highlightthickness=2)
-                            break
+                                is_selected = True
+                                break
+                    
+                    if is_selected:
+                        inner.configure(highlightbackground=COLORS["accent"],
+                                        highlightthickness=2)
+                    else:
+                        inner.configure(highlightbackground=inner["bg"], 
+                                        highlightthickness=0)
 
     # ==================== 通讯录管理 ====================
     def add_contact_dialog(self):
