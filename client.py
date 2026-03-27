@@ -48,82 +48,89 @@ def receive_messages(sock: socket.socket, stop_event: threading.Event, server_ip
             
             message = data.decode(ENCODING)
             
-            # --- 处理联系人在线状态推送 ---
-            if message.startswith("\\CONTACT_STATUS "):
-                parts = message.strip().split(" ")
-                if len(parts) >= 3:
-                    contact_name = parts[1]
-                    status = parts[2]
-                    if status == "removed":
-                        contact_status.pop(contact_name, None)
-                    else:
-                        old_status = contact_status.get(contact_name)
-                        contact_status[contact_name] = status
-                        # 只在状态变化时提示用户
-                        if old_status and old_status != status:
-                            hint = "上线了" if status == "online" else "离线了"
-                            print(f"\r[通讯录] 联系人 '{contact_name}' {hint}")
-                            print("你> ", end="", flush=True)
-                continue
+            # TCP 是流协议，一次 recv() 可能收到多条消息粘在一起
+            # 按换行符分割后逐行处理，避免 startswith() 只匹配第一条消息
+            lines = message.split("\n")
+            need_prompt = False  # 是否需要在最后重新显示输入提示符
 
-            # --- 处理实时语音呼叫信令 ---
-            if message.startswith("\\CALL_REQUEST "):
-                parts = message.split(" ")
-                caller = parts[1]
-                r_port = parts[2].strip()
-                current_pending_port = int(r_port)
+            for line in lines:
+                if not line.strip():
+                    continue
+
+                # --- 处理联系人在线状态推送 ---
+                if line.startswith("\\CONTACT_STATUS "):
+                    parts = line.strip().split(" ")
+                    if len(parts) >= 3:
+                        contact_name = parts[1]
+                        status = parts[2]
+                        if status == "removed":
+                            contact_status.pop(contact_name, None)
+                        else:
+                            old_status = contact_status.get(contact_name)
+                            contact_status[contact_name] = status
+                            # 只在状态变化时提示用户
+                            if old_status and old_status != status:
+                                hint = "上线了" if status == "online" else "离线了"
+                                print(f"\r[通讯录] 联系人 '{contact_name}' {hint}")
+                                need_prompt = True
+                    continue
+
+                # --- 处理实时语音呼叫信令 ---
+                if line.startswith("\\CALL_REQUEST "):
+                    parts = line.split(" ")
+                    caller = parts[1]
+                    r_port = parts[2].strip()
+                    current_pending_port = int(r_port)
+                    
+                    print(f"\n\n[系统提示] >>> 用户 '{caller}' 向你发起实时语音通话！ <<<")
+                    print(f"请输入 /accept {caller} 接受，或输入 /reject {caller} 拒绝。")
+                    need_prompt = True
+                    continue
+                    
+                elif line.startswith("\\CALL_REPLY_FAIL "):
+                    parts = line.split(" ")
+                    target = parts[1]
+                    reason = parts[2].strip()
+                    reasons = {"1": "不在线", "2": "正在通话中", "3": "拒绝了您的请求"}
+                    print(f"\n[系统] 呼叫 '{target}' 失败：{reasons.get(reason, '未知错误')}")
+                    need_prompt = True
+                    continue
+                    
+                elif line.startswith("\\CALL_REPLY_OK "):
+                    parts = line.split(" ")
+                    target = parts[1]
+                    server_udp_port = int(parts[2].strip())
+                    print(f"\n[系统] '{target}' 已接受呼叫！底层 UDP 语音通道打通中...")
+                    need_prompt = True
+                    
+                    # 启动底层双向UDP音频收发线程与服务器进行打洞并传输音频
+                    start_realtime_audio(server_ip, server_udp_port)
+                    continue
                 
-                print(f"\n\n[系统提示] >>> 用户 '{caller}' 向你发起实时语音通话！ <<<")
-                print(f"请输入 /accept {caller} 接受，或输入 /reject {caller} 拒绝。")
-                print("你> ", end="", flush=True)
-                continue
-                
-            elif message.startswith("\\CALL_REPLY_FAIL "):
-                parts = message.split(" ")
-                target = parts[1]
-                reason = parts[2].strip()
-                reasons = {"1": "不在线", "2": "正在通话中", "3": "拒绝了您的请求"}
-                print(f"\n[系统] 呼叫 '{target}' 失败：{reasons.get(reason, '未知错误')}")
-                print("你> ", end="", flush=True)
-                continue
-                
-            elif message.startswith("\\CALL_REPLY_OK "):
-                parts = message.split(" ")
-                target = parts[1]
-                server_udp_port = int(parts[2].strip())
-                print(f"\n[系统] '{target}' 已接受呼叫！底层 UDP 语音通道打通中...")
-                print("你> ", end="", flush=True)
-                
-                # 启动底层双向UDP音频收发线程与服务器进行打洞并传输音频
-                start_realtime_audio(server_ip, server_udp_port)
-                continue
+                # --- 核心：协议解析 ---
+                # 判断接收的字符串里有没有我们定义的音频标头 `AUDIO:`
+                if "AUDIO:" in line:
+                    prefix, b64_audio = line.split("AUDIO:", 1)
+                    print(f"\r{prefix} 发送了一段语音消息，正在播放...")
+                    
+                    wav_bytes = base64.b64decode(b64_audio)
+                    
+                    recv_file = "recv_voice.wav"
+                    with open(recv_file, "wb") as f:
+                        f.write(wav_bytes)
+                    
+                    play_audio(recv_file)
+                    need_prompt = True
+                    
+                else:
+                    # 不是语音，那就当做普通文字打印
+                    if "通话已被" in line and "终止" in line:
+                        stop_realtime_audio()
+                    print(f"\r{line}")
+                    need_prompt = True
             
-            # --- 核心：协议解析 ---
-            # 判断接收的字符串里有没有我们定义的音频标头 `AUDIO:`
-            if "AUDIO:" in message:
-                # 字符串长这样： "[14:20:30] 张三: AUDIO:UklGR...="
-                # 分割为头部和音频 Base64 数据
-                prefix, b64_audio = message.split("AUDIO:", 1)
-                print(f"\r{prefix} 发送了一段语音消息，正在播放...")
-                
-                # 1. 还原：将 Base64 文本解码回原本生成的 Wav 二进制流
-                wav_bytes = base64.b64decode(b64_audio)
-                
-                # 2. 保存磁盘：PyAudio/wave 库读文件播放更稳定
-                recv_file = "recv_voice.wav"
-                with open(recv_file, "wb") as f:
-                    f.write(wav_bytes)
-                
-                # 3. 播放
-                play_audio(recv_file)
-                
-            else:
-                # 不是语音，那就当做普通文字打印
-                if "通话已被" in message and "终止" in message:
-                    stop_realtime_audio()
-                print(f"\r{message}")
-            
-            print("你> ", end="", flush=True)
+            if need_prompt:
+                print("你> ", end="", flush=True)
 
         except ConnectionResetError:
             print("\n[系统] 连接被服务器重置")
@@ -153,8 +160,8 @@ def start_client():
 
     # ---- 获取连接信息 ----
     #server_ip = "DESKTOP-4AFQ0JR" # 使用我的计算机名来作为服务器 就不用担心局域网内 IP 地址变化了 你们要改成你们自己的hostname 或者直接输入局域网 IP 地址
-    # server_ip = "10.198.53.115" #蒋利伟主机名"desktop_m2mi6se8"
-    server_ip = "10.192.59.140" #蒋利伟主机名"desktop_m2mi6se8"
+    server_ip = "10.192.53.115" #蒋利伟主机名"desktop_m2mi6se8"
+    # server_ip = "10.192.59.140" #蒋利伟主机名"desktop_m2mi6se8"
     port = 9999
 
     username = input("请输入你的用户名: ").strip()
