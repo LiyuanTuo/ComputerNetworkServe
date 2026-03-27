@@ -212,6 +212,8 @@ def handle_contacts_command(username: str, text: str, client_sock: socket.socket
         if removed:
             save_contacts()
             client_sock.sendall(f"[{timestamp()}] [通讯录] 已删除联系人：{target}\n".encode(ENCODING))
+            # 通知自己清除本地状态缓存
+            client_sock.sendall(f"\\CONTACT_STATUS {target} removed\n".encode(ENCODING))
             # 通知对方（如果在线）
             target_sock = get_user_sock(target)
             if target_sock:
