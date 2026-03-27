@@ -30,6 +30,9 @@ ENCODING = "utf-8"
 # ==== 实时语音状态控制 ====
 current_pending_port = None
 
+# ==== 联系人在线状态 ====
+contact_status: dict[str, str] = {}  # {联系人用户名: "online"/"offline"}
+
 def receive_messages(sock: socket.socket, stop_event: threading.Event, server_ip: str):
     """
     接收线程：持续从服务器接收消息并处理，包含解析 Base64 音频
@@ -45,6 +48,24 @@ def receive_messages(sock: socket.socket, stop_event: threading.Event, server_ip
             
             message = data.decode(ENCODING)
             
+            # --- 处理联系人在线状态推送 ---
+            if message.startswith("\\CONTACT_STATUS "):
+                parts = message.strip().split(" ")
+                if len(parts) >= 3:
+                    contact_name = parts[1]
+                    status = parts[2]
+                    if status == "removed":
+                        contact_status.pop(contact_name, None)
+                    else:
+                        old_status = contact_status.get(contact_name)
+                        contact_status[contact_name] = status
+                        # 只在状态变化时提示用户
+                        if old_status and old_status != status:
+                            hint = "上线了" if status == "online" else "离线了"
+                            print(f"\r[通讯录] 联系人 '{contact_name}' {hint}")
+                            print("你> ", end="", flush=True)
+                continue
+
             # --- 处理实时语音呼叫信令 ---
             if message.startswith("\\CALL_REQUEST "):
                 parts = message.split(" ")
@@ -132,7 +153,8 @@ def start_client():
 
     # ---- 获取连接信息 ----
     #server_ip = "DESKTOP-4AFQ0JR" # 使用我的计算机名来作为服务器 就不用担心局域网内 IP 地址变化了 你们要改成你们自己的hostname 或者直接输入局域网 IP 地址
-    server_ip = "10.198.4.172" #蒋利伟主机名"desktop_m2mi6se8"
+    # server_ip = "10.198.53.115" #蒋利伟主机名"desktop_m2mi6se8"
+    server_ip = "10.192.59.140" #蒋利伟主机名"desktop_m2mi6se8"
     port = 9999
 
     username = input("请输入你的用户名: ").strip()
@@ -166,12 +188,23 @@ def start_client():
     recv_thread.start()
 
     # ---- 主线程：发送消息 ----
-    print("提示: 输入文字回车发送 | 输入 /voice 录制发送语音留言 | 输入 /call @用户名 发起实时语音 | /quit 退出\n")
+    print("提示: 输入文字回车发送 | /voice 语音留言 | /call @用户 实时语音 | /contacts 管理通讯录 | /status 查看联系人状态 | /quit 退出\n")
     try:
         while not stop_event.is_set():
             print("你> ", end="", flush=True)
             msg = input()
             if not msg: # 如果用户直接按回车，输入为空字符串，就继续下一轮循环，等待有效输入
+                continue
+
+            # ---- 本地查看联系人在线状态 ----
+            if msg.lower() == "/status":
+                if not contact_status:
+                    print("[通讯录] 暂无联系人状态信息，请先 /contacts add <用户名>")
+                else:
+                    print(f"[通讯录] 联系人状态 ({len(contact_status)} 人):")
+                    for name, status in contact_status.items():
+                        hint = "在线" if status == "online" else "离线"
+                        print(f"  - {name} [{hint}]")
                 continue
 
             # ---- 处理录音指令 ----

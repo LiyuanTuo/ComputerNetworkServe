@@ -34,8 +34,220 @@ pending_calls: dict = {}                 # 呼叫中状态 {呼叫者: {"target"
 pending_calls_lock = threading.Lock()
 
 
-logs = []                                # 存储日志，应该是列表类型
-logs_lock = threading.Lock()             # 日志锁，保护 logs 列表
+# ============ 联系人电话本 ============
+CONTACTS_FILE = "contacts.json"
+contacts: dict[str, list[str]] = {}      # {用户名: [联系人用户名列表]}
+contacts_lock = threading.Lock()         # 线程锁，保护 contacts 字典
+
+
+def load_contacts():
+    """从 JSON 文件加载联系人数据"""
+    global contacts
+    try:
+        with open(CONTACTS_FILE, "r", encoding=ENCODING) as f:
+            data = json.load(f)
+            if isinstance(data, dict):
+                contacts = data
+    except (FileNotFoundError, json.JSONDecodeError):
+        contacts = {}
+
+
+def save_contacts():
+    """将联系人数据持久化到 JSON 文件"""
+    with contacts_lock:
+        try:
+            with open(CONTACTS_FILE, "w", encoding=ENCODING) as f:
+                json.dump(contacts, f, ensure_ascii=False, indent=4)
+        except Exception as e:
+            print(f"[错误] 保存联系人失败: {e}")
+
+
+def is_mutual_contact(user1: str, user2: str) -> bool:
+    """检查两个用户是否互为联系人"""
+    with contacts_lock:
+        return user2 in contacts.get(user1, []) and user1 in contacts.get(user2, [])
+
+
+def is_user_online(username: str) -> bool:
+    """检查用户是否在线"""
+    with clients_lock:
+        return username in clients.values()
+
+
+def get_user_sock(username: str):
+    """通过用户名查找 socket"""
+    with clients_lock:
+        for sock, name in clients.items():
+            if name == username:
+                return sock
+    return None
+
+
+def notify_contact_status(username: str, online: bool):
+    """
+    当用户上线/下线时，通知所有将其添加为联系人的在线用户
+    消息格式：\\CONTACT_STATUS 用户名 online/offline
+    """
+    status = "online" if online else "offline"
+    msg = f"\\CONTACT_STATUS {username} {status}\n".encode(ENCODING)
+    with contacts_lock:
+        # 找出所有将 username 加为联系人的用户
+        interested_users = [u for u, cl in contacts.items() if username in cl]
+    with clients_lock:
+        for sock, name in clients.items():
+            if name in interested_users:
+                try:
+                    sock.sendall(msg)
+                except Exception:
+                    pass
+
+
+def send_initial_contact_status(username: str, client_sock: socket.socket):
+    """
+    用户刚上线时，向其推送所有联系人的当前在线状态
+    """
+    with contacts_lock:
+        user_contacts = contacts.get(username, [])
+    if not user_contacts:
+        return
+    with clients_lock:
+        online_users = set(clients.values())
+    for contact_name in user_contacts:
+        status = "online" if contact_name in online_users else "offline"
+        try:
+            client_sock.sendall(f"\\CONTACT_STATUS {contact_name} {status}\n".encode(ENCODING))
+        except Exception:
+            break
+
+
+def handle_contacts_command(username: str, text: str, client_sock: socket.socket):
+    """
+    处理联系人 CRUD 命令
+
+    命令格式：
+      /contacts                  - 查看自己的所有联系人及在线状态
+      /contacts add <用户名>     - 添加联系人（双向）
+      /contacts del <用户名>     - 删除联系人（双向）
+      /contacts search <关键字>  - 按名字搜索联系人
+    """
+    parts = text.split()
+
+    if len(parts) == 1:
+        # /contacts → 查看所有联系人及在线状态
+        with contacts_lock:
+            user_contacts = contacts.get(username, [])
+        if not user_contacts:
+            resp = f"[{timestamp()}] [通讯录] 您的通讯录为空，使用 /contacts add <用户名> 添加联系人\n"
+        else:
+            with clients_lock:
+                online_users = set(clients.values())
+            lines = [f"[{timestamp()}] [通讯录] 您的通讯录 ({len(user_contacts)} 人):"]
+            for i, name in enumerate(user_contacts, 1):
+                status = "在线" if name in online_users else "离线"
+                lines.append(f"  {i}. {name} [{status}]")
+            resp = "\n".join(lines) + "\n"
+        client_sock.sendall(resp.encode(ENCODING))
+        return True
+
+    action = parts[1].lower()
+
+    if action == "add":
+        if len(parts) < 3:
+            client_sock.sendall(f"[{timestamp()}] [通讯录] 格式：/contacts add <用户名>\n".encode(ENCODING))
+            return True
+        target = parts[2]
+        if target == username:
+            client_sock.sendall(f"[{timestamp()}] [通讯录] 不能添加自己为联系人\n".encode(ENCODING))
+            return True
+        with contacts_lock:
+            # 初始化双方列表
+            if username not in contacts:
+                contacts[username] = []
+            if target not in contacts:
+                contacts[target] = []
+            # 检查是否已存在
+            if target in contacts[username]:
+                client_sock.sendall(f"[{timestamp()}] [通讯录] '{target}' 已在您的通讯录中\n".encode(ENCODING))
+                return True
+            # 双向添加
+            contacts[username].append(target)
+            if username not in contacts[target]:
+                contacts[target].append(username)
+        save_contacts()
+        client_sock.sendall(f"[{timestamp()}] [通讯录] 已添加联系人：{target}\n".encode(ENCODING))
+        # 通知对方（如果在线）
+        target_sock = get_user_sock(target)
+        if target_sock:
+            try:
+                target_sock.sendall(f"[{timestamp()}] [通讯录] '{username}' 将您添加为联系人\n".encode(ENCODING))
+                # 推送 username 的在线状态给 target
+                target_sock.sendall(f"\\CONTACT_STATUS {username} online\n".encode(ENCODING))
+            except Exception:
+                pass
+            # 推送 target 的在线状态给 username
+            try:
+                client_sock.sendall(f"\\CONTACT_STATUS {target} online\n".encode(ENCODING))
+            except Exception:
+                pass
+        else:
+            try:
+                client_sock.sendall(f"\\CONTACT_STATUS {target} offline\n".encode(ENCODING))
+            except Exception:
+                pass
+        return True
+
+    elif action == "del":
+        if len(parts) < 3:
+            client_sock.sendall(f"[{timestamp()}] [通讯录] 格式：/contacts del <用户名>\n".encode(ENCODING))
+            return True
+        target = parts[2]
+        removed = False
+        with contacts_lock:
+            # 双向删除
+            if username in contacts and target in contacts[username]:
+                contacts[username].remove(target)
+                removed = True
+            if target in contacts and username in contacts[target]:
+                contacts[target].remove(username)
+        if removed:
+            save_contacts()
+            client_sock.sendall(f"[{timestamp()}] [通讯录] 已删除联系人：{target}\n".encode(ENCODING))
+            # 通知对方（如果在线）
+            target_sock = get_user_sock(target)
+            if target_sock:
+                try:
+                    target_sock.sendall(f"[{timestamp()}] [通讯录] '{username}' 将您从联系人中移除\n".encode(ENCODING))
+                    target_sock.sendall(f"\\CONTACT_STATUS {username} removed\n".encode(ENCODING))
+                except Exception:
+                    pass
+        else:
+            client_sock.sendall(f"[{timestamp()}] [通讯录] 未找到联系人：{target}\n".encode(ENCODING))
+        return True
+
+    elif action == "search":
+        if len(parts) < 3:
+            client_sock.sendall(f"[{timestamp()}] [通讯录] 格式：/contacts search <关键字>\n".encode(ENCODING))
+            return True
+        keyword = parts[2]
+        with contacts_lock:
+            user_contacts = contacts.get(username, [])
+            results = [name for name in user_contacts if keyword in name]
+        if not results:
+            resp = f"[{timestamp()}] [通讯录] 未找到包含 '{keyword}' 的联系人\n"
+        else:
+            with clients_lock:
+                online_users = set(clients.values())
+            lines = [f"[{timestamp()}] [通讯录] 搜索结果 ({len(results)} 人):"]
+            for i, name in enumerate(results, 1):
+                status = "在线" if name in online_users else "离线"
+                lines.append(f"  {i}. {name} [{status}]")
+            resp = "\n".join(lines) + "\n"
+        client_sock.sendall(resp.encode(ENCODING))
+        return True
+
+    else:
+        client_sock.sendall(f"[{timestamp()}] [通讯录] 未知操作 '{action}'，可用：add / del / search\n".encode(ENCODING))
+        return True
 
 
 def timestamp() -> str:
@@ -267,6 +479,11 @@ def handle_call_request(caller_name: str, target_name: str, caller_sock: socket.
         caller_sock.sendall(f"[{timestamp()}] [系统] 不能和自己建立语音。\n".encode(ENCODING))
         return
 
+    # 检查是否互为联系人
+    if not is_mutual_contact(caller_name, target_name):
+        caller_sock.sendall(f"[{timestamp()}] [系统] '{target_name}' 不是您的联系人，请先 /contacts add {target_name}\n".encode(ENCODING))
+        return
+
     with active_calls_lock:
         if caller_name in active_calls:
             caller_sock.sendall(f"[{timestamp()}] [系统] 您当前正在通话中，请先结束当前通话 (/RealTime -quit)。\n".encode(ENCODING))
@@ -399,19 +616,17 @@ def handle_client(client_sock: socket.socket, addr: tuple):
         join_msg = f"[{timestamp()}] >>> '{username}' 加入了聊天室 <<<"
         broadcast(join_msg)
 
-        with logs_lock:
-            logs.append({
-                "timestamp": timestamp(),
-                "event": "user join",
-                "username": username
-            })
-
+        # 通知该用户的联系人：他上线了
+        notify_contact_status(username, online=True)
 
         # 给新用户发送欢迎消息和在线列表
         with clients_lock:
             online = ", ".join(clients.values())
         welcome = f"[{timestamp()}] 欢迎 {username}！当前在线用户: {online}\n"
         client_sock.sendall(welcome.encode(ENCODING))
+
+        # 推送该用户所有联系人的当前在线状态
+        send_initial_contact_status(username, client_sock)
 
         # ---- 第二步：循环接收并广播消息 ----
         while True:
@@ -424,7 +639,9 @@ def handle_client(client_sock: socket.socket, addr: tuple):
                 continue
 
             # 处理特殊命令
-            if text.lower() == "/online":
+            if text.lower().startswith("/contacts"):
+                handle_contacts_command(username, text, client_sock)
+            elif text.lower() == "/online":
                 with clients_lock:
                     online = ", ".join(clients.values())
                 client_sock.sendall(
@@ -460,14 +677,28 @@ def handle_client(client_sock: socket.socket, addr: tuple):
             elif text[0] == '@':
                 # become    @tuoliyuan AUDIO:xxxxxx
                 target_name = text.split(sep=' ')[0][1:]  # targetname = tuoliyuan
-                formatted = f"[{timestamp()}] {username}: {text.split(sep=' ')[1]}" # text.split(sep=' ')[1] = "AUDIO:xxxxxx"
-                # 提取目标用户名
-                privatecast(formatted, target_name, sender_socket=client_sock)
+                # 检查是否互为联系人
+                if not is_mutual_contact(username, target_name):
+                    client_sock.sendall(f"[{timestamp()}] [系统] '{target_name}' 不是您的联系人，请先 /contacts add {target_name}\n".encode(ENCODING))
+                elif not is_user_online(target_name):
+                    client_sock.sendall(f"[{timestamp()}] [系统] '{target_name}' 当前不在线\n".encode(ENCODING))
+                else:
+                    formatted = f"[{timestamp()}] {username}: {text.split(sep=' ')[1]}" # text.split(sep=' ')[1] = "AUDIO:xxxxxx"
+                    privatecast(formatted, target_name, sender_socket=client_sock)
 
             else:
-                # 普通消息 → 广播给其他客户端
+                # 普通消息 → 广播给所有在线联系人（而非所有在线用户）
+                with contacts_lock:
+                    user_contacts = contacts.get(username, [])
                 formatted = f"[{timestamp()}] {username}: {text}"
-                broadcast(formatted, sender_socket=client_sock)
+                data_bytes = formatted.encode(ENCODING)
+                with clients_lock:
+                    for sock, name in list(clients.items()):
+                        if name in user_contacts and sock != client_sock:
+                            try:
+                                sock.sendall(data_bytes)
+                            except Exception:
+                                remove_client(sock)
 
     except ConnectionResetError:
         pass
@@ -480,12 +711,8 @@ def handle_client(client_sock: socket.socket, addr: tuple):
         if username:
             leave_msg = f"[{timestamp()}] >>> '{username}' 离开了聊天室 <<<"
             broadcast(leave_msg)
-            with logs_lock:
-                logs.append({
-                    "timestamp": timestamp(),
-                    "event": "user leave",
-                    "username": username
-                })
+            # 通知该用户的联系人：他下线了
+            notify_contact_status(username, online=False)
 
 
 def start_server():
@@ -555,13 +782,10 @@ def start_server():
         server_sock.close()
         print("[服务器] 已关闭")
 
-        with logs_lock:
-            with open("logs.jsonl", "a", encoding=ENCODING) as f: # 改后缀为 .jsonl 区分
-                for entry in logs:
-                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-            print(f"[系统] 已追加 {len(logs)} 条新记录")
+        # 保存联系人数据
+        save_contacts()
 
 
 if __name__ == "__main__":
-        
+    load_contacts()
     start_server()
