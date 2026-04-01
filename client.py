@@ -160,7 +160,7 @@ def start_client():
 
     # ---- 获取连接信息 ----
     #server_ip = "DESKTOP-4AFQ0JR" # 使用我的计算机名来作为服务器 就不用担心局域网内 IP 地址变化了 你们要改成你们自己的hostname 或者直接输入局域网 IP 地址
-    server_ip = "10.192.53.115" #蒋利伟主机名"desktop_m2mi6se8"
+    server_ip = "10.192.6.204" #蒋利伟主机名"desktop_m2mi6se8"
     # server_ip = "10.192.59.140" #蒋利伟主机名"desktop_m2mi6se8"
     port = 9999
 

@@ -84,6 +84,20 @@ udp_voice_active = False
 udp_voice_socket = None
 VOICE_RATE = 16000  # 实时语音优化采样率
 
+# 通话控制状态
+udp_voice_mute = False   # 麦克风静音状态 (自己说话不发送)
+udp_voice_pause = False  # 会话暂停状态 (不发声音，不播放声音)
+
+def set_mute(state):
+    global udp_voice_mute
+    udp_voice_mute = state
+    print(f"\n[音频系统] 麦克风静音状态 -> {'开启' if state else '关闭'}")
+
+def set_pause(state):
+    global udp_voice_pause
+    udp_voice_pause = state
+    print(f"\n[音频系统] 语音暂停状态 -> {'开启' if state else '关闭'}")
+
 
 # 全局 Pyaudio 对象，避免在多个线程中同时初始化导致 C 语言层面发生 Segfault 卡退
 _pyaudio_instance = None
@@ -116,8 +130,11 @@ def udp_audio_send_thread(udp_sock, server_ip, server_port):
         while udp_voice_active:
             # 每次读取 CHUNK(1024) 大小的音频块，禁用溢出异常以防卡顿
             data = stream.read(CHUNK, exception_on_overflow=False)
-            # 通过 UDP socket 直接扔向服务器，延迟极低
-            udp_sock.sendto(data, (server_ip, server_port))
+            
+            # 过滤发声：如果不在暂停并且没有静音，才真正常量外发
+            if not udp_voice_pause and not udp_voice_mute:
+                # 通过 UDP socket 直接扔向服务器，延迟极低
+                udp_sock.sendto(data, (server_ip, server_port))
     except Exception as e:
         # print(f"\\n[发送线程异常] {e}")
         pass
@@ -152,8 +169,10 @@ def udp_audio_recv_thread(udp_sock):
             # 过滤掉由于打洞产生的 HOLE_PUNCH 包以及非正常大小的包
             if data == b"HOLE_PUNCH" or len(data) == 0:
                 continue
-            # 接收到音频数据后，直接写入扬声器播放发声
-            stream.write(data)
+            
+            # 假如本地并未点击“暂停声音”按钮才写入扬声器打出对方的声音
+            if not udp_voice_pause:
+                stream.write(data)
     except Exception as e:
         # 调试排错输出
         # print(f"\\n[接收线程异常] {e}")
@@ -172,8 +191,12 @@ def start_realtime_audio(server_ip, server_port):
       - server_ip: 服务器 IP
       - server_port: 服务器预先分配的接收端口
     """
-    global udp_voice_active, udp_voice_socket
+    global udp_voice_active, udp_voice_socket, udp_voice_mute, udp_voice_pause
     if udp_voice_active: return
+    
+    # 每次新建连接初始化开关
+    udp_voice_mute = False
+    udp_voice_pause = False
     
     udp_voice_active = True
     udp_voice_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

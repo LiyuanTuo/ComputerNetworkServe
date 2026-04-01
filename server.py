@@ -677,15 +677,20 @@ def handle_client(client_sock: socket.socket, addr: tuple):
                     # 给目标直接做系统级别中继下发
                     privatecast(f"\\TCP_VOICE_FROM @{username} {voice_data}", target_name, client_sock)
             elif text[0] == '@':
-                # become    @tuoliyuan AUDIO:xxxxxx
-                target_name = text.split(sep=' ')[0][1:]  # targetname = tuoliyuan
+                # become    @tuoliyuan content
+                parts = text.split(' ', 1)
+                target_name = parts[0][1:]  # targetname = tuoliyuan
+                if len(parts) > 1:
+                    content = parts[1]
+                else:
+                    content = ""
                 # 检查是否互为联系人
                 if not is_mutual_contact(username, target_name):
                     client_sock.sendall(f"[{timestamp()}] [系统] '{target_name}' 不是您的联系人，请先 /contacts add {target_name}\n".encode(ENCODING))
                 elif not is_user_online(target_name):
                     client_sock.sendall(f"[{timestamp()}] [系统] '{target_name}' 当前不在线\n".encode(ENCODING))
                 else:
-                    formatted = f"[{timestamp()}] {username}: {text.split(sep=' ')[1]}" # text.split(sep=' ')[1] = "AUDIO:xxxxxx"
+                    formatted = f"[{timestamp()}] [私聊] {username}: {content}"
                     privatecast(formatted, target_name, sender_socket=client_sock)
 
             else:
