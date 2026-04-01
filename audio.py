@@ -105,12 +105,12 @@ udp_voice_pause = False  # 会话暂停状态 (不发声音，不播放声音)
 def set_mute(state):
     global udp_voice_mute
     udp_voice_mute = state
-    print(f"\n[音频系统] 麦克风静音状态 -> {'开启' if state else '关闭'}")
+    print(f"\n[音频系统] 麦克风状态 -> {'静音' if state else '开启'}")
 
 def set_pause(state):
     global udp_voice_pause
     udp_voice_pause = state
-    print(f"\n[音频系统] 语音暂停状态 -> {'开启' if state else '关闭'}")
+    print(f"\n[音频系统] 语音状态 -> {'暂停' if state else '开启'}")
 
 
 # 全局 Pyaudio 对象，避免在多个线程中同时初始化导致 C 语言层面发生 Segfault 卡退
@@ -137,7 +137,7 @@ def udp_audio_send_thread(udp_sock, server_ip, server_port):
                     rate=VOICE_RATE,
                     input=True,
                     frames_per_buffer=CHUNK)
-    print("\n[系统] 麦克风已开启，双向语音打通！(输入 /realtime -quit 挂断)")
+    print("\n[系统] 双向语音通道已建立，状态：默认静音 (开启麦克风请发送 /open_voice，退出请挂断)")
     print("你> ", end="", flush=True)
     try:
         # 当语音通话处于激活状态时，持续采集并发送
@@ -212,7 +212,7 @@ def start_realtime_audio(server_ip, server_port):
     if udp_voice_active: return
     
     # 每次新建连接初始化开关
-    udp_voice_mute = False
+    udp_voice_mute = True
     udp_voice_pause = False
     
     udp_voice_active = True

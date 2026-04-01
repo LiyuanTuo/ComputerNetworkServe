@@ -35,8 +35,29 @@ pending_calls: dict = {}                 # 呼叫中状态 {呼叫者: {"target"
 pending_calls_lock = threading.Lock()
 
 # ============ 房间 (多播/中继) 状态 ============
+ROOMS_FILE = "rooms.json"
 rooms: dict = {}                         # {room_id: {"members": {username: (ip, port)}, "relay_sock": socket, "port": int}}
-rooms_lock = threading.Lock()
+rooms_lock = threading.RLock()
+
+
+def save_rooms():
+    """将会议室数据持久化到 JSON 文件"""
+    with rooms_lock:
+        serializable_rooms = {}
+        for room_id, room_info in rooms.items():
+            members = {}
+            for un, addr_info in room_info.get("members", {}).items():
+                members[un] = list(addr_info) if addr_info else None
+            serializable_rooms[room_id] = {
+                "members": members,
+                "port": room_info.get("port")
+            }
+        try:
+            with open(ROOMS_FILE, "w", encoding=ENCODING) as f:
+                json.dump(serializable_rooms, f, ensure_ascii=False, indent=4)
+        except Exception as e:
+            print(f"[错误] 保存会议室至 JSON 失败: {e}")
+
 
 # ============ 联系人电话本 ============
 CONTACTS_FILE = "contacts.json"
@@ -329,6 +350,9 @@ def remove_client(client_sock: socket.socket):
                 del rooms[room_id]
                 if room_id in impacted_rooms:
                     impacted_rooms.remove(room_id)
+            
+            if impacted_rooms or empty_rooms:
+                save_rooms()
                     
         for room_id in impacted_rooms:
             broadcast_room_members(room_id)
@@ -623,7 +647,7 @@ def broadcast_room_members(room_id: str):
             return
         
         room = rooms[room_id]
-        member_list = [{"name": name, "ip": addr[0], "port": addr[1]} for name, addr in room["members"].items()]
+        member_list = [{"name": name, "ip": addr[0] if addr else "", "port": addr[1] if addr else 0} for name, addr in room["members"].items()]
         msg = f"/ROOM_MEMBERS {room_id} {json.dumps(member_list)}\n".encode(ENCODING)
         
         for name in room["members"]:
@@ -635,7 +659,8 @@ def broadcast_room_members(room_id: str):
 
 def room_udp_worker(room_id: str):
     """
-    房间专用的 UDP 端口，用于 STUN (获取外网坐标) 和 处理降级中继
+    房间专用的 UDP 端口，用于 每个客户端真实的公网 IP 和端口 (即 NAT 地址) 
+    处理降级中继，
     """
     with rooms_lock:
         if room_id not in rooms: return
@@ -646,7 +671,7 @@ def room_udp_worker(room_id: str):
             data, addr = relay_sock.recvfrom(BUFFER_SIZE)
             if not data: continue
             
-            # STUN 握手包 (纯文本): STUN_HELLO username
+            # 获取公网地址和端口号的握手包 (纯文本): STUN_HELLO username
             if data.startswith(b"STUN_HELLO "):
                 parts = data.decode(ENCODING).strip().split(" ", 1)
                 if len(parts) == 2:
@@ -654,6 +679,7 @@ def room_udp_worker(room_id: str):
                     with rooms_lock:
                         if room_id in rooms:
                             rooms[room_id]["members"][username] = addr
+                    save_rooms()
                     # 广播更新全房间的 NAT 信息
                     broadcast_room_members(room_id)
                 continue
@@ -687,10 +713,12 @@ def handle_room_create(username: str, client_sock: socket.socket):
 
     with rooms_lock:
         rooms[room_id] = {
-            "members": {},     # {username: (ip, port)}
+            "members": {username: None},     # {username: (ip, port) 或 None}
             "relay_sock": relay_sock,
             "port": relay_port
         }
+    
+    save_rooms()
 
     # 启动该房间专设的 UDP STUN/中继 线程
     threading.Thread(target=room_udp_worker, args=(room_id,), daemon=True).start()
@@ -705,7 +733,10 @@ def handle_room_join(username: str, room_id: str, client_sock: socket.socket):
         if room_id not in rooms:
             client_sock.sendall(f"[{timestamp()}] [系统] 会议室 {room_id} 不存在或已解散\n".encode(ENCODING))
             return
+        rooms[room_id]["members"][username] = None
         relay_port = rooms[room_id]["port"]
+        
+    save_rooms()
         
     client_sock.sendall(f"[{timestamp()}] [系统] 成功进入会议室 {room_id}，正在进行 P2P 穿透握手...\n".encode(ENCODING))
     client_sock.sendall(f"/ROOM_JOINED {room_id} {relay_port}\n".encode(ENCODING))
@@ -723,8 +754,10 @@ def handle_room_quit(username: str, room_id: str, client_sock: socket.socket):
                 try: rooms[room_id]["relay_sock"].close()
                 except: pass
                 del rooms[room_id]
+                save_rooms()
                 return
                 
+    save_rooms()
     broadcast_room_members(room_id)
     client_sock.sendall(f"[{timestamp()}] [系统] 您已离开会议室 {room_id}\n".encode(ENCODING))
 
@@ -825,7 +858,20 @@ def handle_client(client_sock: socket.socket, addr: tuple):
                 if len(parts) == 3:
                     room_id = parts[1].strip()
                     target_name = parts[2].strip()
-                    client_sock.sendall(f"[{timestamp()}] [系统] 服务器已为您和 '{target_name}' 开启中转桥接\n".encode(ENCODING))
+                    client_sock.sendall(f"[{timestamp()}] [系统] 服务器已为您和'{target_name}'开启中转桥接\n".encode(ENCODING))
+            elif text.strip() in ("\\open_voice", "\\close_voice", "/open_voice", "/close_voice"):
+                state_str = "开启" if "open" in text else "关闭"
+                formatted = f"[{timestamp()}] [会议室] {username} {state_str}了语音传输"
+                with rooms_lock:
+                    for room_id, room in rooms.items():
+                        if username in room["members"]:
+                            for member_name in room["members"]:
+                                sock = get_user_sock(member_name)
+                                if sock:
+                                    try: sock.sendall(f"{formatted}\n".encode(ENCODING))
+                                    except: pass
+                            break
+
             elif text.lower().startswith("/tcp_voice @"):
                 # 接收降级后的音频数据：\TCP_VOICE @对方名字 payload二进制
                 parts = text.split(' ', 2)
@@ -852,18 +898,37 @@ def handle_client(client_sock: socket.socket, addr: tuple):
                     privatecast(formatted, target_name, sender_socket=client_sock)
 
             else:
-                # 普通消息 → 广播给所有在线联系人（而非所有在线用户）
-                with contacts_lock:
-                    user_contacts = contacts.get(username, [])
-                formatted = f"[{timestamp()}] {username}: {text}"
-                data_bytes = formatted.encode(ENCODING)
-                with clients_lock:
-                    for sock, name in list(clients.items()):
-                        if name in user_contacts and sock != client_sock:
-                            try:
-                                sock.sendall(data_bytes)
-                            except Exception:
-                                remove_client(sock)
+                # 检查该用户是否在某个会议室中
+                user_rooms = []
+                with rooms_lock:
+                    for room_id, room in rooms.items():
+                        if username in room["members"]:
+                            user_rooms.append((room_id, list(room["members"].keys())))
+                
+                if user_rooms:
+                    # 如果在会议室中，发给会议室内的所有其他人
+                    for room_id, members in user_rooms:
+                        formatted = f"[{timestamp()}] [会议室 {room_id}] {username}: {text}\n"
+                        data_bytes = formatted.encode(ENCODING)
+                        for member_name in members:
+                            if member_name != username:
+                                sock = get_user_sock(member_name)
+                                if sock:
+                                    try: sock.sendall(data_bytes)
+                                    except: pass
+                else:
+                    # 普通消息 → 广播给所有在线好友
+                    with contacts_lock:
+                        user_contacts = contacts.get(username, [])
+                    formatted = f"[{timestamp()}] {username}: {text}\n"
+                    data_bytes = formatted.encode(ENCODING)
+                    with clients_lock:
+                        for sock, name in list(clients.items()):
+                            if name in user_contacts and sock != client_sock:
+                                try:
+                                    sock.sendall(data_bytes)
+                                except Exception:
+                                    remove_client(sock)
 
     except ConnectionResetError:
         pass
@@ -890,6 +955,8 @@ def start_server():
       3. 开始监听
       4. 循环 accept 新连接，为每个连接创建处理线程
     """
+    global rooms
+    
     # 创建 TCP/IPv4 套接字
     server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
@@ -949,8 +1016,21 @@ def start_server():
 
         # 保存联系人数据
         save_contacts()
+        
+        # 清空房间退出保存
+        with rooms_lock:
+            for rid, room in rooms.items():
+                try: room["relay_sock"].close()
+                except: pass
+            rooms.clear()
+            
+        save_rooms()
 
 
 if __name__ == "__main__":
+    # 启动前清空旧的会议室历史记录
+    with rooms_lock:
+        rooms.clear()
+    save_rooms()
     load_contacts()
     start_server()

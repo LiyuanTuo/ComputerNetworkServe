@@ -21,6 +21,7 @@ import pyaudio
 import wave
 import base64
 import os
+import json
 from audio import * 
 # ============ 配置 ============
 # 对于音频传输，普通的 4096 缓冲区不够大，改为 1MB
@@ -105,6 +106,40 @@ def receive_messages(sock: socket.socket, stop_event: threading.Event, server_ip
                     
                     # 启动底层双向UDP音频收发线程与服务器进行打洞并传输音频
                     start_realtime_audio(server_ip, server_udp_port)
+                    continue
+
+                # --- 处理会议室相关信令 ---
+                elif line.startswith("/ROOM_CREATED "):
+                    parts = line.split(" ")
+                    room_id = parts[1]
+                    server_udp_port = int(parts[2].strip())
+                    print(f"\n[系统] 会议室 {room_id} 创建成功！UDP 语音通道打通中...（默认静音，开启语音请发送 /open_voice）")
+                    need_prompt = True
+                    start_realtime_audio(server_ip, server_udp_port)
+                    set_mute(True)
+                    continue
+
+                elif line.startswith("/ROOM_JOINED "):
+                    parts = line.split(" ")
+                    room_id = parts[1]
+                    server_udp_port = int(parts[2].strip())
+                    print(f"\n[系统] 成功加入会议室 {room_id}！UDP 语音通道打通中...（默认静音，开启语音请发送 /open_voice）")
+                    need_prompt = True
+                    start_realtime_audio(server_ip, server_udp_port)
+                    set_mute(True)
+                    continue
+
+                elif line.startswith("/ROOM_MEMBERS "):
+                    parts = line.split(" ", 2)
+                    if len(parts) >= 3:
+                        room_id = parts[1]
+                        try:
+                            members_list = json.loads(parts[2])
+                            member_names = [m["name"] for m in members_list]
+                            print(f"\n[会议室 {room_id}] 当前成员: {', '.join(member_names)}")
+                        except Exception:
+                            pass
+                    need_prompt = True
                     continue
                 
                 # --- 核心：协议解析 ---
@@ -195,7 +230,9 @@ def start_client():
     recv_thread.start()
 
     # ---- 主线程：发送消息 ----
-    print("提示: 输入文字回车发送 | /voice 语音留言 | /call @用户 实时语音 | /contacts 管理通讯录 | /status 查看联系人状态 | /quit 退出\n")
+    print("提示: 输入文字回车发送 | /voice 语音留言 | /call @用户 实时语音 | /contacts 管理通讯录 | /status 查看联系人状态 | /quit 退出")
+    print("      /ROOM_CREATE 创建会议 | /ROOM_JOIN <房间号> 加入会议 | /ROOM_QUIT <房间号> 退出并挂断语音")
+    print("      /open_voice 开启语音传输 | /close_voice 停止语音传输（静音）\n")
     try:
         while not stop_event.is_set():
             print("你> ", end="", flush=True)
@@ -246,7 +283,39 @@ def start_client():
                 client_sock.sendall(f"/CALL_REJECT {caller}".encode(ENCODING))
                 print(f"[系统] 已拒绝 {caller} 的呼叫。")
                 continue
+
+            # ---- 处理会议室控制指令 ----
+            elif msg.lower().startswith("/room_create"):
+                client_sock.sendall("/ROOM_CREATE".encode(ENCODING))
+                continue
                 
+            elif msg.lower().startswith("/room_join"):
+                parts = msg.split()
+                if len(parts) >= 2:
+                    client_sock.sendall(f"/ROOM_JOIN {parts[1]}".encode(ENCODING))
+                else:
+                    print("[系统] 格式错误，请使用：/ROOM_JOIN <房间号>")
+                continue
+                
+            elif msg.lower().startswith("/room_quit"):
+                stop_realtime_audio()  # 本地挂断 UDP 语音流
+                parts = msg.split()
+                if len(parts) >= 2:
+                    client_sock.sendall(f"/ROOM_QUIT {parts[1]}".encode(ENCODING))
+                else:
+                    client_sock.sendall("/ROOM_QUIT".encode(ENCODING))
+                continue
+
+            elif msg.lower().startswith("/open_voice"):
+                set_mute(False)
+                client_sock.sendall(msg.encode(ENCODING))
+                continue
+
+            elif msg.lower().startswith("/close_voice"):
+                set_mute(True)
+                client_sock.sendall(msg.encode(ENCODING))
+                continue
+
             elif msg.lower() == "/realtime -quit":
                 stop_realtime_audio()
                 # 会交给服务器去广播结束消息
