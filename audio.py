@@ -8,12 +8,26 @@ import base64
 import os
 import time
 import time
+import math
+import struct
+
+try:
+    import audioop
+    def get_rms(data): return audioop.rms(data, 2)
+except ImportError:
+    def get_rms(data):
+        count = len(data) // 2
+        if count == 0: return 0
+        shorts = struct.unpack(f"<{count}h", data)
+        return math.sqrt(sum(s*s for s in shorts) / count)
 
 # 音频录制配置参数
 CHUNK = 1024             # 采样块大小
 FORMAT = pyaudio.paInt16 # 量化位深：16位 (2字节)
 CHANNELS = 1             # 单声道
 RATE = 44100             # 采样率
+VOICE_RATE = 16000       # 实时语音专用的相对较小采样率（节省带宽）
+SILENCE_THRESHOLD = 500  # 语音活动检测(VAD) RMS 阈值，低于此值视为静音不发包
 RECORD_SECONDS = 3       # 默认语音留言时长：3 秒
 TEMP_WAV_FILE = "temp_voice.wav"  # 用于录音写入的临时文件名
 
@@ -131,10 +145,13 @@ def udp_audio_send_thread(udp_sock, server_ip, server_port):
             # 每次读取 CHUNK(1024) 大小的音频块，禁用溢出异常以防卡顿
             data = stream.read(CHUNK, exception_on_overflow=False)
             
-            # 过滤发声：如果不在暂停并且没有静音，才真正常量外发
+            # 过滤发声：如果不在暂停并且没有静音
             if not udp_voice_pause and not udp_voice_mute:
-                # 通过 UDP socket 直接扔向服务器，延迟极低
-                udp_sock.sendto(data, (server_ip, server_port))
+                # VAD: 计算音量能量（RMS），低于阈值则不发包（静音滤除，节省带宽）
+                rms_val = get_rms(data)
+                if rms_val > SILENCE_THRESHOLD:
+                    # 通过 UDP socket 直接扔向服务器，延迟极低
+                    udp_sock.sendto(data, (server_ip, server_port))
     except Exception as e:
         # print(f"\\n[发送线程异常] {e}")
         pass

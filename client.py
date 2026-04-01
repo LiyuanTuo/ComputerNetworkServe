@@ -58,7 +58,7 @@ def receive_messages(sock: socket.socket, stop_event: threading.Event, server_ip
                     continue
 
                 # --- 处理联系人在线状态推送 ---
-                if line.startswith("\\CONTACT_STATUS "):
+                if line.startswith("/CONTACT_STATUS "):
                     parts = line.strip().split(" ")
                     if len(parts) >= 3:
                         contact_name = parts[1]
@@ -76,7 +76,7 @@ def receive_messages(sock: socket.socket, stop_event: threading.Event, server_ip
                     continue
 
                 # --- 处理实时语音呼叫信令 ---
-                if line.startswith("\\CALL_REQUEST "):
+                if line.startswith("/CALL_REQUEST "):
                     parts = line.split(" ")
                     caller = parts[1]
                     r_port = parts[2].strip()
@@ -87,7 +87,7 @@ def receive_messages(sock: socket.socket, stop_event: threading.Event, server_ip
                     need_prompt = True
                     continue
                     
-                elif line.startswith("\\CALL_REPLY_FAIL "):
+                elif line.startswith("/CALL_REPLY_FAIL "):
                     parts = line.split(" ")
                     target = parts[1]
                     reason = parts[2].strip()
@@ -96,7 +96,7 @@ def receive_messages(sock: socket.socket, stop_event: threading.Event, server_ip
                     need_prompt = True
                     continue
                     
-                elif line.startswith("\\CALL_REPLY_OK "):
+                elif line.startswith("/CALL_REPLY_OK "):
                     parts = line.split(" ")
                     target = parts[1]
                     server_udp_port = int(parts[2].strip())
@@ -234,7 +234,7 @@ def start_client():
             if msg.startswith("/accept "):
                 caller = msg.split(" ")[1]
                 # 发送同意指令通过 TCP 提给服务器
-                client_sock.sendall(f"\\CALL_ACCEPT {caller}".encode(ENCODING))
+                client_sock.sendall(f"/CALL_ACCEPT {caller}".encode(ENCODING))
                 print(f"[系统] 已同意 {caller} 的接入，正在建立底层 UDP 通讯...")
                 # 启动底层双向UDP音频收发线程与服务器进行打洞并传输音频
                 if current_pending_port is not None:
@@ -243,7 +243,7 @@ def start_client():
                 
             elif msg.startswith("/reject "):
                 caller = msg.split(" ")[1]
-                client_sock.sendall(f"\\CALL_REJECT {caller}".encode(ENCODING))
+                client_sock.sendall(f"/CALL_REJECT {caller}".encode(ENCODING))
                 print(f"[系统] 已拒绝 {caller} 的呼叫。")
                 continue
                 
