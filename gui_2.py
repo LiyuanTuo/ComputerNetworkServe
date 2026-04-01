@@ -420,7 +420,7 @@ class VoiceChatApp:
                     if not line.strip():
                         continue
 
-                    if line.startswith("\\CONTACT_STATUS "):
+                    if line.startswith("/CONTACT_STATUS "):
                         parts = line.strip().split(" ")
                         if len(parts) >= 3:
                             contact_name = parts[1]
@@ -438,14 +438,14 @@ class VoiceChatApp:
                             self.root.after(0, self.refresh_contacts_ui)
                         continue
 
-                    if line.startswith("\\CALL_REQUEST "):
+                    if line.startswith("/CALL_REQUEST "):
                         parts = line.split(" ")
                         caller = parts[1]
                         r_port = int(parts[2].strip())
                         self.root.after(0, lambda c=caller, p=r_port: self.handle_incoming_call(c, p))
                         continue
 
-                    if line.startswith("\\CALL_REPLY_FAIL "):
+                    if line.startswith("/CALL_REPLY_FAIL "):
                         parts = line.split(" ")
                         target = parts[1]
                         reason = parts[2].strip()
@@ -453,7 +453,7 @@ class VoiceChatApp:
                         self.append_to_history(target, f"[系统] 呼叫 '{target}' 失败：{reasons.get(reason, '未知错误')}", "system")
                         continue
 
-                    if line.startswith("\\CALL_REPLY_OK "):
+                    if line.startswith("/CALL_REPLY_OK "):
                         parts = line.split(" ")
                         target = parts[1]
                         udp_port = int(parts[2].strip())
@@ -537,11 +537,11 @@ class VoiceChatApp:
 
     def handle_incoming_call(self, caller, port):
         if messagebox.askyesno("来电", f"用户 '{caller}' 邀请你进行实时通话，是否接听？"):
-            self.client_sock.sendall(f"\\CALL_ACCEPT {caller}".encode(ENCODING))
+            self.client_sock.sendall(f"/CALL_ACCEPT {caller}".encode(ENCODING))
             start_realtime_audio(self.server_ip, port)
             self.show_call_overlay(caller)
         else:
-            self.client_sock.sendall(f"\\CALL_REJECT {caller}".encode(ENCODING))
+            self.client_sock.sendall(f"/CALL_REJECT {caller}".encode(ENCODING))
 
     def on_call_accepted(self, target, udp_port):
         self.append_to_history(target, f"[系统] '{target}' 已接受呼叫，通话建立中...", "system")

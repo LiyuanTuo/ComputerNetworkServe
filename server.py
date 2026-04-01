@@ -18,6 +18,7 @@ import threading
 import json
 import sys
 from datetime import datetime
+import uuid
 
 # ============ 配置 ============
 HOST = "0.0.0.0"  # 监听所有网卡，局域网内其他主机可连接
@@ -33,6 +34,9 @@ active_calls_lock = threading.Lock()
 pending_calls: dict = {}                 # 呼叫中状态 {呼叫者: {"target": 被叫者, "sock": udp_sock, "port": udp_port}}
 pending_calls_lock = threading.Lock()
 
+# ============ 房间 (多播/中继) 状态 ============
+rooms: dict = {}                         # {room_id: {"members": {username: (ip, port)}, "relay_sock": socket, "port": int}}
+rooms_lock = threading.Lock()
 
 # ============ 联系人电话本 ============
 CONTACTS_FILE = "contacts.json"
@@ -86,10 +90,10 @@ def get_user_sock(username: str):
 def notify_contact_status(username: str, online: bool):
     """
     当用户上线/下线时，通知所有将其添加为联系人的在线用户
-    消息格式：\\CONTACT_STATUS 用户名 online/offline
+    消息格式：/CONTACT_STATUS 用户名 online/offline
     """
     status = "online" if online else "offline"
-    msg = f"\\CONTACT_STATUS {username} {status}\n".encode(ENCODING)
+    msg = f"/CONTACT_STATUS {username} {status}\n".encode(ENCODING)
     with contacts_lock:
         # 找出所有将 username 加为联系人的用户
         interested_users = [u for u, cl in contacts.items() if username in cl]
@@ -115,7 +119,7 @@ def send_initial_contact_status(username: str, client_sock: socket.socket):
     for contact_name in user_contacts:
         status = "online" if contact_name in online_users else "offline"
         try:
-            client_sock.sendall(f"\\CONTACT_STATUS {contact_name} {status}\n".encode(ENCODING))
+            client_sock.sendall(f"/CONTACT_STATUS {contact_name} {status}\n".encode(ENCODING))
         except Exception:
             break
 
@@ -181,17 +185,17 @@ def handle_contacts_command(username: str, text: str, client_sock: socket.socket
             try:
                 target_sock.sendall(f"[{timestamp()}] [通讯录] '{username}' 将您添加为联系人\n".encode(ENCODING))
                 # 推送 username 的在线状态给 target
-                target_sock.sendall(f"\\CONTACT_STATUS {username} online\n".encode(ENCODING))
+                target_sock.sendall(f"/CONTACT_STATUS {username} online\n".encode(ENCODING))
             except Exception:
                 pass
             # 推送 target 的在线状态给 username
             try:
-                client_sock.sendall(f"\\CONTACT_STATUS {target} online\n".encode(ENCODING))
+                client_sock.sendall(f"/CONTACT_STATUS {target} online\n".encode(ENCODING))
             except Exception:
                 pass
         else:
             try:
-                client_sock.sendall(f"\\CONTACT_STATUS {target} offline\n".encode(ENCODING))
+                client_sock.sendall(f"/CONTACT_STATUS {target} offline\n".encode(ENCODING))
             except Exception:
                 pass
         return True
@@ -213,13 +217,13 @@ def handle_contacts_command(username: str, text: str, client_sock: socket.socket
             save_contacts()
             client_sock.sendall(f"[{timestamp()}] [通讯录] 已删除联系人：{target}\n".encode(ENCODING))
             # 通知自己清除本地状态缓存
-            client_sock.sendall(f"\\CONTACT_STATUS {target} removed\n".encode(ENCODING))
+            client_sock.sendall(f"/CONTACT_STATUS {target} removed\n".encode(ENCODING))
             # 通知对方（如果在线）
             target_sock = get_user_sock(target)
             if target_sock:
                 try:
                     target_sock.sendall(f"[{timestamp()}] [通讯录] '{username}' 将您从联系人中移除\n".encode(ENCODING))
-                    target_sock.sendall(f"\\CONTACT_STATUS {username} removed\n".encode(ENCODING))
+                    target_sock.sendall(f"/CONTACT_STATUS {username} removed\n".encode(ENCODING))
                 except Exception:
                     pass
         else:
@@ -308,8 +312,28 @@ def remove_client(client_sock: socket.socket):
     except Exception:
         pass
         
-    # 如果用户掉线，清理那些还没接通的呼叫状态
+    # 如果用户离线，将其从所有的语音房间中剔除
     if username:
+        impacted_rooms = []
+        with rooms_lock:
+            empty_rooms = []
+            for room_id, room in list(rooms.items()):
+                if username in room["members"]:
+                    del room["members"][username]
+                    impacted_rooms.append(room_id)
+                if not room["members"]:
+                    empty_rooms.append(room_id)
+            for room_id in empty_rooms:
+                try: rooms[room_id]["relay_sock"].close()
+                except: pass
+                del rooms[room_id]
+                if room_id in impacted_rooms:
+                    impacted_rooms.remove(room_id)
+                    
+        for room_id in impacted_rooms:
+            broadcast_room_members(room_id)
+        
+        # 如果用户掉线，清理那些还没接通的呼叫状态
         with pending_calls_lock:
             # 他是呼叫者
             if username in pending_calls:
@@ -491,7 +515,7 @@ def handle_call_request(caller_name: str, target_name: str, caller_sock: socket.
             caller_sock.sendall(f"[{timestamp()}] [系统] 您当前正在通话中，请先结束当前通话 (/RealTime -quit)。\n".encode(ENCODING))
             return
         if target_name in active_calls: # 您呼叫的用户正忙，请稍后再拨
-            caller_sock.sendall(f"\\CALL_REPLY_FAIL {target_name} 2\n".encode(ENCODING))
+            caller_sock.sendall(f"/CALL_REPLY_FAIL {target_name} 2\n".encode(ENCODING))
             return
             
     with pending_calls_lock:
@@ -507,7 +531,7 @@ def handle_call_request(caller_name: str, target_name: str, caller_sock: socket.
                 break
                 
     if not target_sock: #您呼叫的用户已关机，请稍后再拨
-        caller_sock.sendall(f"\\CALL_REPLY_FAIL {target_name} 1\n".encode(ENCODING))
+        caller_sock.sendall(f"/CALL_REPLY_FAIL {target_name} 1\n".encode(ENCODING))
         return
 
     # 创建一条专用的 UDP 隧道中继
@@ -526,7 +550,7 @@ def handle_call_request(caller_name: str, target_name: str, caller_sock: socket.
     # 通过 TCP 告诉目标：有人呼叫，你可以往这个 UDP 端口打洞
     # 消息格式：\CALL_REQUEST caller_name relay_port
     try:
-        target_sock.sendall(f"\\CALL_REQUEST {caller_name} {relay_port}\n".encode(ENCODING))
+        target_sock.sendall(f"/CALL_REQUEST {caller_name} {relay_port}\n".encode(ENCODING))
     except Exception:
         pass
         
@@ -560,7 +584,7 @@ def handle_call_reply(target_name: str, caller_name: str, is_accept: bool, targe
         # 目标拒绝
         relay_sock.close()
         if caller_sock: #对方拒绝你的语音邀请
-            try: caller_sock.sendall(f"\\CALL_REPLY_FAIL {target_name} 3\n".encode(ENCODING))
+            try: caller_sock.sendall(f"/CALL_REPLY_FAIL {target_name} 3\n".encode(ENCODING))
             except: pass
         if target_sock:
              try: target_sock.sendall(f"[{timestamp()}] [系统] 已拒绝 '{caller_name}' 的语音邀请。\n".encode(ENCODING))
@@ -581,11 +605,128 @@ def handle_call_reply(target_name: str, caller_name: str, is_accept: bool, targe
 
     # 告诉主叫方：目标已同意接入请求，并且告诉它 UDP 中继端口是多少
     if caller_sock: 
-        try: caller_sock.sendall(f"\\CALL_REPLY_OK {target_name} {relay_port}\n".encode(ENCODING))
+        try: caller_sock.sendall(f"/CALL_REPLY_OK {target_name} {relay_port}\n".encode(ENCODING))
         except: pass
     if target_sock:
         try: target_sock.sendall(f"[{timestamp()}] [系统] 语音已接通，正在建立后台安全通道...\n".encode(ENCODING))
         except: pass
+
+
+def broadcast_room_members(room_id: str):
+    """
+    通过 TCP 广播房间内的所有成员的 NAT 坐标（用户名, IP, 端口）
+    给该房间内所有已经成功打洞/已发握手包的成员。
+    消息格式: /ROOM_MEMBERS [{"name": "A", "ip": "1.1.1.1", "port": 1234}, ...]
+    """
+    with rooms_lock:
+        if room_id not in rooms:
+            return
+        
+        room = rooms[room_id]
+        member_list = [{"name": name, "ip": addr[0], "port": addr[1]} for name, addr in room["members"].items()]
+        msg = f"/ROOM_MEMBERS {room_id} {json.dumps(member_list)}\n".encode(ENCODING)
+        
+        for name in room["members"]:
+            sock = get_user_sock(name)
+            if sock:
+                try: sock.sendall(msg)
+                except: pass
+
+
+def room_udp_worker(room_id: str):
+    """
+    房间专用的 UDP 端口，用于 STUN (获取外网坐标) 和 处理降级中继
+    """
+    with rooms_lock:
+        if room_id not in rooms: return
+        relay_sock = rooms[room_id]["relay_sock"]
+
+    while True:
+        try:
+            data, addr = relay_sock.recvfrom(BUFFER_SIZE)
+            if not data: continue
+            
+            # STUN 握手包 (纯文本): STUN_HELLO username
+            if data.startswith(b"STUN_HELLO "):
+                parts = data.decode(ENCODING).strip().split(" ", 1)
+                if len(parts) == 2:
+                    username = parts[1]
+                    with rooms_lock:
+                        if room_id in rooms:
+                            rooms[room_id]["members"][username] = addr
+                    # 广播更新全房间的 NAT 信息
+                    broadcast_room_members(room_id)
+                continue
+                
+            # 中断/降级中继包 (带有 target_name 的二进制音频)
+            # 格式约定: b"RELAY target_name " + payload
+            if data.startswith(b"RELAY "):
+                # 分割前两段：b"RELAY", b"target_name"
+                parts = data.split(b' ', 2)
+                if len(parts) >= 3:
+                    target_name = parts[1].decode(ENCODING)
+                    payload = parts[2]
+                    
+                    with rooms_lock:
+                        if room_id in rooms and target_name in rooms[room_id]["members"]:
+                            target_addr = rooms[room_id]["members"][target_name]
+                            try:
+                                relay_sock.sendto(b"RELAY_DATA " + payload, target_addr)
+                            except: pass
+
+        except Exception:
+            break
+
+
+def handle_room_create(username: str, client_sock: socket.socket):
+    """创建新会议室并返回房间号及 UDP 端口"""
+    room_id = str(uuid.uuid4())[:6].upper()
+    relay_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    relay_sock.bind((HOST, 0))
+    relay_port = relay_sock.getsockname()[1]
+
+    with rooms_lock:
+        rooms[room_id] = {
+            "members": {},     # {username: (ip, port)}
+            "relay_sock": relay_sock,
+            "port": relay_port
+        }
+
+    # 启动该房间专设的 UDP STUN/中继 线程
+    threading.Thread(target=room_udp_worker, args=(room_id,), daemon=True).start()
+
+    client_sock.sendall(f"[{timestamp()}] [系统] 您已创建会议室 {room_id}，正在连接信令服务器...\n".encode(ENCODING))
+    client_sock.sendall(f"/ROOM_CREATED {room_id} {relay_port}\n".encode(ENCODING))
+
+
+def handle_room_join(username: str, room_id: str, client_sock: socket.socket):
+    """加入指定会议室"""
+    with rooms_lock:
+        if room_id not in rooms:
+            client_sock.sendall(f"[{timestamp()}] [系统] 会议室 {room_id} 不存在或已解散\n".encode(ENCODING))
+            return
+        relay_port = rooms[room_id]["port"]
+        
+    client_sock.sendall(f"[{timestamp()}] [系统] 成功进入会议室 {room_id}，正在进行 P2P 穿透握手...\n".encode(ENCODING))
+    client_sock.sendall(f"/ROOM_JOINED {room_id} {relay_port}\n".encode(ENCODING))
+
+
+def handle_room_quit(username: str, room_id: str, client_sock: socket.socket):
+    """退出指定会议室"""
+    with rooms_lock:
+        if room_id in rooms:
+            if username in rooms[room_id]["members"]:
+                del rooms[room_id]["members"][username]
+                
+            # 若房间空了，释放 UDP socket 资源并清理
+            if not rooms[room_id]["members"]:
+                try: rooms[room_id]["relay_sock"].close()
+                except: pass
+                del rooms[room_id]
+                return
+                
+    broadcast_room_members(room_id)
+    client_sock.sendall(f"[{timestamp()}] [系统] 您已离开会议室 {room_id}\n".encode(ENCODING))
 
 
 def handle_client(client_sock: socket.socket, addr: tuple):
@@ -660,22 +801,39 @@ def handle_client(client_sock: socket.socket, addr: tuple):
                 if len(parts) == 2:
                     target_name = parts[1].strip()
                     handle_call_request(username, target_name, client_sock)
-            elif text.startswith("\\CALL_ACCEPT "): #接收方同意语音请求
+            elif text.startswith("/CALL_ACCEPT "): #接收方同意语音请求
                 parts = text.split(' ', 1)
                 caller_name = parts[1].strip()
                 handle_call_reply(username, caller_name, True, client_sock)
-            elif text.startswith("\\CALL_REJECT "): #接收方拒绝语音请求
+            elif text.startswith("/CALL_REJECT "): #接收方拒绝语音请求
                 parts = text.split(' ', 1)
                 caller_name = parts[1].strip()
                 handle_call_reply(username, caller_name, False, client_sock)
-            elif text.lower().startswith("\\tcp_voice @"):
+            elif text.startswith("/ROOM_CREATE"):
+                handle_room_create(username, client_sock)
+            elif text.startswith("/ROOM_JOIN "):
+                parts = text.split(" ", 1)
+                room_id = parts[1].strip()
+                handle_room_join(username, room_id, client_sock)
+            elif text.startswith("/ROOM_QUIT"):
+                parts = text.split(" ", 1)
+                if len(parts) == 2:
+                    room_id = parts[1].strip()
+                    handle_room_quit(username, room_id, client_sock)
+            elif text.startswith("/ROOM_RELAY_REQUEST "):
+                parts = text.split(" ", 2)
+                if len(parts) == 3:
+                    room_id = parts[1].strip()
+                    target_name = parts[2].strip()
+                    client_sock.sendall(f"[{timestamp()}] [系统] 服务器已为您和 '{target_name}' 开启中转桥接\n".encode(ENCODING))
+            elif text.lower().startswith("/tcp_voice @"):
                 # 接收降级后的音频数据：\TCP_VOICE @对方名字 payload二进制
                 parts = text.split(' ', 2)
                 if len(parts) >= 3:
                     target_name = parts[1][1:] # 移除@
                     voice_data = parts[2]
                     # 给目标直接做系统级别中继下发
-                    privatecast(f"\\TCP_VOICE_FROM @{username} {voice_data}", target_name, client_sock)
+                    privatecast(f"/TCP_VOICE_FROM @{username} {voice_data}", target_name, client_sock)
             elif text[0] == '@':
                 # become    @tuoliyuan content
                 parts = text.split(' ', 1)
