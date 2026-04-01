@@ -33,12 +33,14 @@ current_pending_port = None
 
 # ==== 联系人在线状态 ====
 contact_status: dict[str, str] = {}  # {联系人用户名: "online"/"offline"}
+client_username = ""
+current_room_id = ""
 
 def receive_messages(sock: socket.socket, stop_event: threading.Event, server_ip: str):
     """
     接收线程：持续从服务器接收消息并处理，包含解析 Base64 音频
     """
-    global current_pending_port
+    global current_pending_port, current_room_id
     while not stop_event.is_set():
         try:
             data = sock.recv(BUFFER_SIZE)
@@ -105,7 +107,8 @@ def receive_messages(sock: socket.socket, stop_event: threading.Event, server_ip
                     need_prompt = True
                     
                     # 启动底层双向UDP音频收发线程与服务器进行打洞并传输音频
-                    start_realtime_audio(server_ip, server_udp_port)
+                    init_udp_session(server_ip, server_udp_port, client_username, "")
+                    start_audio_stream()
                     continue
 
                 # --- 处理会议室相关信令 ---
@@ -113,9 +116,10 @@ def receive_messages(sock: socket.socket, stop_event: threading.Event, server_ip
                     parts = line.split(" ")
                     room_id = parts[1]
                     server_udp_port = int(parts[2].strip())
-                    print(f"\n[系统] 会议室 {room_id} 创建成功！UDP 语音通道打通中...（默认静音，开启语音请发送 /open_voice）")
+                    current_room_id = room_id
+                    print(f"\r[系统] 会议室 {room_id} 内 UDP 中继/直连通道建立中... (默认静音)")
                     need_prompt = True
-                    start_realtime_audio(server_ip, server_udp_port)
+                    init_udp_session(server_ip, server_udp_port, client_username, room_id)
                     set_mute(True)
                     continue
 
@@ -123,9 +127,10 @@ def receive_messages(sock: socket.socket, stop_event: threading.Event, server_ip
                     parts = line.split(" ")
                     room_id = parts[1]
                     server_udp_port = int(parts[2].strip())
-                    print(f"\n[系统] 成功加入会议室 {room_id}！UDP 语音通道打通中...（默认静音，开启语音请发送 /open_voice）")
+                    current_room_id = room_id
+                    print(f"\r[系统] 成功打通 UDP 信令交互，房间 {room_id} 语音通道建立中...")
                     need_prompt = True
-                    start_realtime_audio(server_ip, server_udp_port)
+                    init_udp_session(server_ip, server_udp_port, client_username, room_id)
                     set_mute(True)
                     continue
 
@@ -136,7 +141,12 @@ def receive_messages(sock: socket.socket, stop_event: threading.Event, server_ip
                         try:
                             members_list = json.loads(parts[2])
                             member_names = [m["name"] for m in members_list]
-                            print(f"\n[会议室 {room_id}] 当前成员: {', '.join(member_names)}")
+                            
+                            # 更新全局 member dict (in audio.py)
+                            room_members.clear()
+                            room_members.update({m["name"]: (m["ip"], m["port"]) for m in members_list})
+                            
+                            print(f"\r[会议室 {room_id}] 当前成员: {', '.join(member_names)}")
                         except Exception:
                             pass
                     need_prompt = True
@@ -160,7 +170,8 @@ def receive_messages(sock: socket.socket, stop_event: threading.Event, server_ip
                 else:
                     # 不是语音，那就当做普通文字打印
                     if "通话已被" in line and "终止" in line:
-                        stop_realtime_audio()
+                        close_udp_session()
+                        current_room_id = ""
                     print(f"\r{line}")
                     need_prompt = True
             
@@ -193,8 +204,10 @@ def start_client():
     print("  局域网聊天客户端")
     print("=" * 50)
 
+    global client_username
+
     # ---- 获取连接信息 ----
-    #server_ip = "DESKTOP-4AFQ0JR" # 使用我的计算机名来作为服务器 就不用担心局域网内 IP 地址变化了 你们要改成你们自己的hostname 或者直接输入局域网 IP 地址
+    # server_ip = "DESKTOP-4AFQ0JR" # 使用我的计算机名来作为服务器 就不用担心局域网内 IP 地址变化了 你们要改成你们自己的hostname 或者直接输入局域网 IP 地址
     server_ip = "10.192.6.204" #蒋利伟主机名"desktop_m2mi6se8"
     # server_ip = "10.192.59.140" #蒋利伟主机名"desktop_m2mi6se8"
     port = 9999
@@ -202,6 +215,7 @@ def start_client():
     username = input("请输入你的用户名: ").strip()
     if not username:
         username = "匿名用户"
+    client_username = username
 
     # ---- 创建并连接 Socket ----
     client_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -230,9 +244,11 @@ def start_client():
     recv_thread.start()
 
     # ---- 主线程：发送消息 ----
-    print("提示: 输入文字回车发送 | /voice 语音留言 | /call @用户 实时语音 | /contacts 管理通讯录 | /status 查看联系人状态 | /quit 退出")
-    print("      /ROOM_CREATE 创建会议 | /ROOM_JOIN <房间号> 加入会议 | /ROOM_QUIT <房间号> 退出并挂断语音")
-    print("      /open_voice 开启语音传输 | /close_voice 停止语音传输（静音）\n")
+    global current_room_id
+    print("提示: 输入文字回车发送\n /voice 语音留言 \n /call @用户 实时语音 \n /contacts 管理通讯录 \n /status 查看联系人状态 \n /quit 退出")
+    print(" /ROOM_CREATE 创建会议 \n /ROOM_JOIN <房间号> 加入会议 \n /ROOM_QUIT <房间号> 退出并挂断语音")
+    print(" /test_p2p <目标用户> <信息> \n /test_relay <目标用户> <信息> \n /p2p_info 查看状态")
+    print(" /open_voice 开启语音传输 \n /close_voice 停止语音传输（静音）\n")
     try:
         while not stop_event.is_set():
             print("你> ", end="", flush=True)
@@ -251,7 +267,40 @@ def start_client():
                         print(f"  - {name} [{hint}]")
                 continue
 
+            elif msg.lower() == "/p2p_info":
+                print("\n=== P2P 连接状态 ===")
+                for user, info in p2p_status.items():
+                    active = "打通(Active)" if info.get('active') else "断开或超时"
+                    addr = info.get('addr')
+                    last_seen = info.get('last_seen', 0)
+                    delay = round(time.time() - last_seen, 2) if last_seen else "N/A"
+                    print(f"用户: {user} | 状态: {active} | 地址: {addr} | 空闲时长: {delay}秒")
+                if not p2p_status:
+                    print("暂无对端 P2P 状态信息。")
+                print("==================\n")
+                continue
+                
             # ---- 处理录音指令 ----
+            if msg.lower().startswith("/test_p2p "):
+                parts = msg.split(" ", 2)
+                if len(parts) >= 3:
+                    target = parts[1]
+                    test_msg = parts[2]
+                    test_p2p_or_relay(client_username, target, use_p2p=True, message=test_msg)
+                else:
+                    print("[系统] 用法: /test_p2p <用户名> <消息内容>")
+                continue
+                
+            elif msg.lower().startswith("/test_relay "):
+                parts = msg.split(" ", 2)
+                if len(parts) >= 3:
+                    target = parts[1]
+                    test_msg = parts[2]
+                    test_p2p_or_relay(client_username, target, use_p2p=False, message=test_msg)
+                else:
+                    print("[系统] 用法: /test_relay <用户名> <消息内容>")
+                continue
+
             if "/voice" in msg.lower():
                 record_audio()  # 录制音频成 wav 格式临时文件
                 
@@ -275,9 +324,10 @@ def start_client():
                 print(f"[系统] 已同意 {caller} 的接入，正在建立底层 UDP 通讯...")
                 # 启动底层双向UDP音频收发线程与服务器进行打洞并传输音频
                 if current_pending_port is not None:
-                    start_realtime_audio(server_ip, current_pending_port)
+                    init_udp_session(server_ip, current_pending_port, client_username, "")
+                    start_audio_stream()
                 continue
-                
+            
             elif msg.startswith("/reject "):
                 caller = msg.split(" ")[1]
                 client_sock.sendall(f"/CALL_REJECT {caller}".encode(ENCODING))
@@ -286,10 +336,16 @@ def start_client():
 
             # ---- 处理会议室控制指令 ----
             elif msg.lower().startswith("/room_create"):
+                if current_room_id:
+                    print(f"[系统] 您已在会议室 {current_room_id} 中，一次只能加入一个会议室。请先 /ROOM_QUIT")
+                    continue
                 client_sock.sendall("/ROOM_CREATE".encode(ENCODING))
                 continue
                 
             elif msg.lower().startswith("/room_join"):
+                if current_room_id:
+                    print(f"[系统] 您已在会议室 {current_room_id} 中，一次只能加入一个会议室。请先 /ROOM_QUIT")
+                    continue
                 parts = msg.split()
                 if len(parts) >= 2:
                     client_sock.sendall(f"/ROOM_JOIN {parts[1]}".encode(ENCODING))
@@ -298,7 +354,8 @@ def start_client():
                 continue
                 
             elif msg.lower().startswith("/room_quit"):
-                stop_realtime_audio()  # 本地挂断 UDP 语音流
+                close_udp_session()  # 本地挂断 UDP 语音流
+                current_room_id = "" # 清空当前所在房间 ID
                 parts = msg.split()
                 if len(parts) >= 2:
                     client_sock.sendall(f"/ROOM_QUIT {parts[1]}".encode(ENCODING))
@@ -307,17 +364,20 @@ def start_client():
                 continue
 
             elif msg.lower().startswith("/open_voice"):
+                start_audio_stream()
                 set_mute(False)
                 client_sock.sendall(msg.encode(ENCODING))
                 continue
 
             elif msg.lower().startswith("/close_voice"):
+                stop_audio_stream()
                 set_mute(True)
                 client_sock.sendall(msg.encode(ENCODING))
                 continue
 
             elif msg.lower() == "/realtime -quit":
-                stop_realtime_audio()
+                close_udp_session()
+                current_room_id = ""
                 # 会交给服务器去广播结束消息
 
             # 普通文本消息，直接发
