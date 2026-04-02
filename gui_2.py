@@ -237,7 +237,7 @@ class VoiceChatApp:
         # 功能按钮行
         action_frame = tk.Frame(right, bg=COLORS["bg"], padx=12)
         action_frame.grid(row=3, column=0, sticky="ew")
-        for i in range(4):
+        for i in range(5):
             action_frame.columnconfigure(i, weight=1)
 
         tk.Button(action_frame, text="🎙 语音留言", font=("微软雅黑", 9), relief="flat",
@@ -252,6 +252,9 @@ class VoiceChatApp:
         tk.Button(action_frame, text="👥 在线用户", font=("微软雅黑", 9), relief="flat",
                   bg=COLORS["card"], cursor="hand2",
                   command=self.request_online_users).grid(row=0, column=3, sticky="ew", padx=2)
+        tk.Button(action_frame, text="❓ 帮助", font=("微软雅黑", 9), relief="flat",
+                  bg=COLORS["card"], cursor="hand2",
+                  command=self.show_help).grid(row=0, column=4, sticky="ew", padx=2)
 
         # 初次请求通讯录列表
         self.root.after(500, self.request_contacts_list)
@@ -481,7 +484,7 @@ class VoiceChatApp:
                             self.append_to_history(target, "[系统] 语音播放失败", "system")
                         continue
 
-                    if "通话已被" in line and "终止" in line:
+                    if ("通话已被" in line and "终止" in line) or "您已成功终止实时语音通话" in line:
                         stop_realtime_audio()
                         self.append_to_history("广播", line, "system")
                         if hasattr(self, "call_win") and self.call_win.winfo_exists():
@@ -600,9 +603,102 @@ class VoiceChatApp:
             self.call_win.destroy()
 
     def open_conference_dialog(self):
-        messagebox.showinfo("组播会议", "正在加入组播组: 224.1.1.1\n(此功能需对接系统组播权限)")
+        """会议室操作菜单"""
+        win = tk.Toplevel(self.root)
+        win.title("会议室")
+        win.geometry("320x220")
+        win.resizable(False, False)
+        win.configure(bg=COLORS["card"])
+
+        tk.Label(win, text="会议室管理", font=("微软雅黑", 12, "bold"),
+                 bg=COLORS["card"], fg=COLORS["text"]).pack(pady=(16, 10))
+
+        # 创建会议室
+        tk.Button(win, text="创建新会议室", bg=COLORS["accent"], fg="white",
+                  font=("微软雅黑", 10), relief="flat", cursor="hand2", width=20,
+                  command=lambda: self._room_create(win)).pack(pady=4)
+
+        # 加入会议室
+        join_frame = tk.Frame(win, bg=COLORS["card"])
+        join_frame.pack(pady=4)
+        self.entry_room_id = tk.Entry(join_frame, font=("Consolas", 10), width=12, bd=1, relief="solid")
+        self.entry_room_id.pack(side="left", padx=(0, 6), ipady=2)
+        self.entry_room_id.insert(0, "房间号")
+        self.entry_room_id.bind("<FocusIn>", lambda e: self.entry_room_id.delete(0, "end") if self.entry_room_id.get() == "房间号" else None)
+        tk.Button(join_frame, text="加入", bg=COLORS["online"], fg="white",
+                  font=("微软雅黑", 9), relief="flat", cursor="hand2",
+                  command=lambda: self._room_join(win)).pack(side="left")
+
+        # 退出会议室
+        tk.Button(win, text="退出当前会议室", bg=COLORS["danger"], fg="white",
+                  font=("微软雅黑", 10), relief="flat", cursor="hand2", width=20,
+                  command=lambda: self._room_quit(win)).pack(pady=4)
+
+    def _room_create(self, win):
+        self.client_sock.sendall("/ROOM_CREATE".encode(ENCODING))
+        self.append_to_history("广播", "[系统] 正在创建会议室...", "system")
+        win.destroy()
+
+    def _room_join(self, win):
+        room_id = self.entry_room_id.get().strip()
+        if not room_id or room_id == "房间号":
+            messagebox.showwarning("提示", "请输入房间号", parent=win)
+            return
+        self.client_sock.sendall(f"/ROOM_JOIN {room_id}".encode(ENCODING))
+        self.append_to_history("广播", f"[系统] 正在加入会议室 {room_id}...", "system")
+        win.destroy()
+
+    def _room_quit(self, win):
+        self.client_sock.sendall("/ROOM_QUIT".encode(ENCODING))
+        stop_realtime_audio()
+        self.append_to_history("广播", "[系统] 已退出会议室", "system")
+        win.destroy()
 
     # ==================== 工具方法 ====================
+    def show_help(self):
+        """显示帮助窗口"""
+        win = tk.Toplevel(self.root)
+        win.title("帮助")
+        win.geometry("420x480")
+        win.resizable(False, False)
+        win.configure(bg=COLORS["card"])
+
+        tk.Label(win, text="LinkVoice 功能帮助", font=("微软雅黑", 13, "bold"),
+                 bg=COLORS["card"], fg=COLORS["text"]).pack(pady=(12, 6))
+
+        help_text = tk.Text(win, font=("微软雅黑", 9), bg="#FAFAFA", fg=COLORS["text"],
+                            wrap="word", bd=0, padx=14, pady=10, relief="flat")
+        help_text.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+
+        content = """【聊天】
+• 选中「广播」频道发送 → 消息广播给所有联系人
+• 选中某个联系人发送 → 私聊消息
+
+【语音留言】
+• 选中联系人，点击「🎙 语音留言」录制 3 秒发送
+
+【实时通话】
+• 选中联系人，点击「📞 实时通话」发起呼叫
+• 来电时会弹窗询问是否接听
+• 通话中可静音、暂停、挂断
+
+【通讯录】
+• 点击左栏「＋添加」→ 输入用户名添加联系人（双向）
+• 点击联系人行的「✕」→ 删除联系人（双向）
+• 绿色圆点 = 在线，灰色 = 离线
+• 在线联系人用浅绿背景高亮
+
+【会议室】
+• 点击「🌐 组播会议」可创建/加入/退出会议室
+• 会议室内默认静音，创建后可开麦发言
+
+【其他】
+• 「👥 在线用户」查看当前所有在线用户
+• 「刷新列表」重新拉取通讯录
+• 「断开连接」安全退出"""
+        help_text.insert("1.0", content)
+        help_text.configure(state="disabled")
+
     def get_selected_user(self):
         name = getattr(self, "selected_contact", None)
         if not name or name == "广播":
