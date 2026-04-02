@@ -169,7 +169,7 @@ def receive_messages(sock: socket.socket, stop_event: threading.Event, server_ip
                     
                 else:
                     # 不是语音，那就当做普通文字打印
-                    if "通话已被" in line and "终止" in line:
+                    if ("通话已被" in line and "终止" in line) or "您已成功终止实时语音通话" in line:
                         close_udp_session()
                         current_room_id = ""
                     print(f"\r{line}")
@@ -208,8 +208,8 @@ def start_client():
 
     # ---- 获取连接信息 ----
     # server_ip = "DESKTOP-4AFQ0JR" # 使用我的计算机名来作为服务器 就不用担心局域网内 IP 地址变化了 你们要改成你们自己的hostname 或者直接输入局域网 IP 地址
-    server_ip = "10.192.6.204" #蒋利伟主机名"desktop_m2mi6se8"
-    # server_ip = "10.192.59.140" #蒋利伟主机名"desktop_m2mi6se8"
+    # server_ip = "10.198.51.210" #蒋利伟主机名"desktop_m2mi6se8"
+    server_ip = "198.18.0.1" #蒋利伟主机名"desktop_m2mi6se8"
     port = 9999
 
     username = input("请输入你的用户名: ").strip()
@@ -245,7 +245,7 @@ def start_client():
 
     # ---- 主线程：发送消息 ----
     global current_room_id
-    print("提示: 输入文字回车发送\n /voice 语音留言 \n /call @用户 实时语音 \n /contacts 管理通讯录 \n /status 查看联系人状态 \n /quit 退出")
+    print("提示: 输入文字回车发送\n /voice 语音留言 \n /call @用户 实时语音 \n /contacts 管理通讯录 \n /status 查看联系人状态 \n /help 查看完整帮助 \n /quit 退出")
     print(" /ROOM_CREATE 创建会议 \n /ROOM_JOIN <房间号> 加入会议 \n /ROOM_QUIT <房间号> 退出并挂断语音")
     print(" /test_p2p <目标用户> <信息> \n /test_relay <目标用户> <信息> \n /p2p_info 查看状态")
     print(" /open_voice 开启语音传输 \n /close_voice 停止语音传输（静音）\n")
@@ -265,6 +265,41 @@ def start_client():
                     for name, status in contact_status.items():
                         hint = "在线" if status == "online" else "离线"
                         print(f"  - {name} [{hint}]")
+                continue
+
+            # ---- 帮助菜单 ----
+            elif msg.lower() == "/help":
+                print("\n" + "=" * 50)
+                print("  LinkVoice 命令帮助")
+                print("=" * 50)
+                print("\n【聊天】")
+                print("  直接输入文字        → 广播给联系人")
+                print("  @用户名 消息        → 私聊消息")
+                print("\n【语音留言】")
+                print("  /voice              → 录制并广播语音")
+                print("  @用户名 /voice      → 录制并私发语音")
+                print("\n【实时通话】")
+                print("  /call @用户名       → 发起实时语音通话")
+                print("  /accept 用户名      → 接听来电")
+                print("  /reject 用户名      → 拒绝来电")
+                print("  /realtime -quit     → 挂断当前通话")
+                print("\n【通讯录】")
+                print("  /contacts           → 查看通讯录")
+                print("  /contacts add 用户  → 添加联系人（双向）")
+                print("  /contacts del 用户  → 删除联系人（双向）")
+                print("  /contacts search 词 → 搜索联系人")
+                print("  /status             → 查看联系人在线状态")
+                print("\n【会议室】")
+                print("  /ROOM_CREATE        → 创建会议室")
+                print("  /ROOM_JOIN 房间号   → 加入会议室")
+                print("  /ROOM_QUIT 房间号   → 退出会议室")
+                print("  /open_voice         → 会议中开麦")
+                print("  /close_voice        → 会议中静音")
+                print("\n【其他】")
+                print("  /online             → 查看所有在线用户")
+                print("  /p2p_info           → 查看 P2P 连接状态")
+                print("  /quit               → 退出客户端")
+                print("=" * 50 + "\n")
                 continue
 
             elif msg.lower() == "/p2p_info":
