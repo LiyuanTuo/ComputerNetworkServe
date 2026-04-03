@@ -541,6 +541,16 @@ def handle_call_request(caller_name: str, target_name: str, caller_sock: socket.
         if target_name in active_calls: # 您呼叫的用户正忙，请稍后再拨
             caller_sock.sendall(f"/CALL_REPLY_FAIL {target_name} 2\n".encode(ENCODING))
             return
+
+    # 检查呼叫双方是否在会议室中
+    with rooms_lock:
+        for room_id, room in rooms.items():
+            if caller_name in room["members"]:
+                caller_sock.sendall(f"[{timestamp()}] [系统] 您当前在会议室中，请先退出会议室再发起通话。\n".encode(ENCODING))
+                return
+            if target_name in room["members"]:
+                caller_sock.sendall(f"/CALL_REPLY_FAIL {target_name} 2\n".encode(ENCODING))
+                return
             
     with pending_calls_lock:
         if caller_name in pending_calls:
@@ -614,6 +624,24 @@ def handle_call_reply(target_name: str, caller_name: str, is_accept: bool, targe
              try: target_sock.sendall(f"[{timestamp()}] [系统] 已拒绝 '{caller_name}' 的语音邀请。\n".encode(ENCODING))
              except: pass
         return
+
+    # 目标同意前，检查双方是否已在通话中
+    with active_calls_lock:
+        if target_name in active_calls:
+            relay_sock.close()
+            if target_sock:
+                try: target_sock.sendall(f"[{timestamp()}] [系统] 您当前正在通话中，无法接听新的呼叫。\n".encode(ENCODING))
+                except: pass
+            if caller_sock:
+                try: caller_sock.sendall(f"/CALL_REPLY_FAIL {target_name} 2\n".encode(ENCODING))
+                except: pass
+            return
+        if caller_name in active_calls:
+            relay_sock.close()
+            if caller_sock:
+                try: caller_sock.sendall(f"[{timestamp()}] [系统] 您已在其他通话中，呼叫已取消。\n".encode(ENCODING))
+                except: pass
+            return
 
     # 目标同意：建立正式的双向映射，并启动中继线程打通
     with active_calls_lock:
@@ -696,9 +724,10 @@ def room_udp_worker(room_id: str):
                     with rooms_lock:
                         if room_id in rooms and target_name in rooms[room_id]["members"]:
                             target_addr = rooms[room_id]["members"][target_name]
-                            try:
-                                relay_sock.sendto(b"RELAY_DATA " + payload, target_addr)
-                            except: pass
+                            if target_addr:  # 防止地址为 None（STUN_HELLO 尚未到达）
+                                try:
+                                    relay_sock.sendto(b"RELAY_DATA " + payload, target_addr)
+                                except: pass
 
         except Exception:
             break
@@ -737,7 +766,10 @@ def handle_room_join(username: str, room_id: str, client_sock: socket.socket):
         relay_port = rooms[room_id]["port"]
         
     save_rooms()
-        
+
+    # 先广播成员列表，让新用户获取现有成员的 NAT 地址，也让现有成员知道新用户的加入
+    broadcast_room_members(room_id)
+
     client_sock.sendall(f"[{timestamp()}] [系统] 成功进入会议室 {room_id}，正在进行 P2P 穿透握手...\n".encode(ENCODING))
     client_sock.sendall(f"/ROOM_JOINED {room_id} {relay_port}\n".encode(ENCODING))
 
