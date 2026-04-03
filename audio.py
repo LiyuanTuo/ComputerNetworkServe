@@ -186,35 +186,17 @@ def get_pyaudio():
 
 def p2p_maintenance_thread(udp_sock, username):
     """
-    P2P 心跳维护线程：定期向房间内的其他成员发送打洞包，并检测连接是否超时。
-    同时定期向服务器重发 STUN_HELLO 以确保 NAT 地址注册不因丢包而失效。
+    NAT 地址维护线程：定期向服务器重发 STUN_HELLO 以确保 NAT 地址注册不因丢包而失效。
+    所有音频数据均通过服务器 RELAY 中转。
     """
-    global udp_session_active, room_members, p2p_status
+    global udp_session_active
     while udp_session_active:
-        current_time = time.time()
-
         # 定期向服务器重发 STUN_HELLO，保证 NAT 地址始终在服务器端注册
         if last_server_ip and last_server_port:
             try:
                 udp_sock.sendto(f"STUN_HELLO {username}".encode("utf-8"), (last_server_ip, last_server_port))
             except Exception:
                 pass
-
-        for target, addr in list(room_members.items()):
-            if target == username:
-                continue
-            if addr and addr[0] and addr[1]:
-                # 发送 P2P_HELLO 打洞包
-                hello_packet = f"P2P_HELLO {username}".encode("utf-8")
-                try:
-                    udp_sock.sendto(hello_packet, (addr[0], addr[1]))
-                except Exception:
-                    pass
-                
-                # 检测超时
-                status = p2p_status.get(target)
-                if status and current_time - status.get('last_seen', 0) > 5.0:
-                    status['active'] = False
         time.sleep(2)
 
 def udp_audio_send_thread(udp_sock, server_ip, server_port, username, room_id):
@@ -243,19 +225,12 @@ def udp_audio_send_thread(udp_sock, server_ip, server_port, username, room_id):
                 rms_val = get_rms(data)
                 if rms_val > SILENCE_THRESHOLD:
                     if room_id:
-                        # 房间模式：向其余所有人发 RELAY 或 P2P
+                        # 房间模式：统一通过服务器 RELAY 中转
                         for target in list(room_members):
                             if target != username:
-                                status = p2p_status.get(target)
-                                if status and status.get('active') and status.get('addr'):
-                                    # P2P 可用，直接发送
-                                    packet = b"P2P_AUDIO " + data
-                                    udp_sock.sendto(packet, status['addr'])
-                                else:
-                                    # 降级使用 RELAY 中继
-                                    header = f"RELAY {target} ".encode("utf-8")
-                                    packet = header + data
-                                    udp_sock.sendto(packet, (server_ip, server_port))
+                                header = f"RELAY {target} ".encode("utf-8")
+                                packet = header + data
+                                udp_sock.sendto(packet, (server_ip, server_port))
                     else:
                         # 点对点原逻辑（如果有）直接发
                         udp_sock.sendto(data, (server_ip, server_port))
@@ -426,7 +401,7 @@ last_room_id = ""
 
 def init_udp_session(server_ip, server_port, username="", room_id=""):
     """
-    建立UDP会话，打洞，启动P2P心跳线程，但不启动音频流。
+    建立UDP会话，向服务器注册NAT地址，启动维护线程，但不启动音频流。
     """
     global udp_session_active, udp_voice_socket, last_server_ip, last_server_port
     global last_username, last_room_id, p2p_thread_obj, audio_recv_thread_obj
