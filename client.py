@@ -209,8 +209,14 @@ def start_client():
     # ---- 获取连接信息 ----
     # server_ip = "DESKTOP-4AFQ0JR" # 使用我的计算机名来作为服务器 就不用担心局域网内 IP 地址变化了 你们要改成你们自己的hostname 或者直接输入局域网 IP 地址
     # server_ip = "10.198.51.210" #蒋利伟主机名"desktop_m2mi6se8"
-    server_ip = "198.18.0.1" #蒋利伟主机名"desktop_m2mi6se8"
+    server_ip = "10.192.26.12" #蒋利伟主机名"desktop_m2mi6se8"
     port = 9999
+
+    # 尝试将主机名解析为 IP 地址（支持 hostname 和 IP 两种输入）
+    try:
+        server_ip = socket.gethostbyname(server_ip)
+    except socket.gaierror:
+        print(f"[警告] 无法解析主机名 '{server_ip}'，将直接尝试连接...")
 
     username = input("请输入你的用户名: ").strip()
     if not username:
@@ -390,10 +396,14 @@ def start_client():
                 
             elif msg.lower().startswith("/room_quit"):
                 close_udp_session()  # 本地挂断 UDP 语音流
-                current_room_id = "" # 清空当前所在房间 ID
                 parts = msg.split()
                 if len(parts) >= 2:
-                    client_sock.sendall(f"/ROOM_QUIT {parts[1]}".encode(ENCODING))
+                    quit_room_id = parts[1]
+                else:
+                    quit_room_id = current_room_id  # 未指定时使用当前房间
+                current_room_id = "" # 清空当前所在房间 ID
+                if quit_room_id:
+                    client_sock.sendall(f"/ROOM_QUIT {quit_room_id}".encode(ENCODING))
                 else:
                     client_sock.sendall("/ROOM_QUIT".encode(ENCODING))
                 continue
@@ -419,6 +429,10 @@ def start_client():
             client_sock.sendall(msg.encode(ENCODING))
 
             if msg.lower() == "/quit":
+                # 退出前清理会议室状态
+                if current_room_id:
+                    close_udp_session()
+                    current_room_id = ""
                 print("[系统] 正在退出...")
                 break
 
