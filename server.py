@@ -704,12 +704,17 @@ def room_udp_worker(room_id: str):
                 parts = data.decode(ENCODING).strip().split(" ", 1)
                 if len(parts) == 2:
                     username = parts[1]
+                    addr_changed = False
                     with rooms_lock:
                         if room_id in rooms:
-                            rooms[room_id]["members"][username] = addr
-                    save_rooms()
-                    # 广播更新全房间的 NAT 信息
-                    broadcast_room_members(room_id)
+                            old_addr = rooms[room_id]["members"].get(username)
+                            if old_addr != addr:
+                                rooms[room_id]["members"][username] = addr
+                                addr_changed = True
+                    if addr_changed:
+                        save_rooms()
+                        # 仅在地址发生变化时才广播更新
+                        broadcast_room_members(room_id)
                 continue
                 
             # 中断/降级中继包 (带有 target_name 的二进制音频)
