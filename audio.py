@@ -187,11 +187,20 @@ def get_pyaudio():
 def p2p_maintenance_thread(udp_sock, username):
     """
     P2P 心跳维护线程：定期向房间内的其他成员发送打洞包，并检测连接是否超时。
+    同时定期向服务器重发 STUN_HELLO 以确保 NAT 地址注册不因丢包而失效。
     """
     global udp_session_active, room_members, p2p_status
     while udp_session_active:
         current_time = time.time()
-        for target, addr in room_members.items():
+
+        # 定期向服务器重发 STUN_HELLO，保证 NAT 地址始终在服务器端注册
+        if last_server_ip and last_server_port:
+            try:
+                udp_sock.sendto(f"STUN_HELLO {username}".encode("utf-8"), (last_server_ip, last_server_port))
+            except Exception:
+                pass
+
+        for target, addr in list(room_members.items()):
             if target == username:
                 continue
             if addr and addr[0] and addr[1]:
@@ -235,7 +244,7 @@ def udp_audio_send_thread(udp_sock, server_ip, server_port, username, room_id):
                 if rms_val > SILENCE_THRESHOLD:
                     if room_id:
                         # 房间模式：向其余所有人发 RELAY 或 P2P
-                        for target in room_members:
+                        for target in list(room_members):
                             if target != username:
                                 status = p2p_status.get(target)
                                 if status and status.get('active') and status.get('addr'):
@@ -434,7 +443,9 @@ def init_udp_session(server_ip, server_port, username="", room_id=""):
         udp_voice_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         
         if username:
-            udp_voice_socket.sendto(f"STUN_HELLO {username}".encode("utf-8"), (server_ip, server_port))
+            # 多次发送 STUN_HELLO 确保 NAT 地址注册成功（UDP 不可靠）
+            for _ in range(3):
+                udp_voice_socket.sendto(f"STUN_HELLO {username}".encode("utf-8"), (server_ip, server_port))
 
         for _ in range(5):
             udp_voice_socket.sendto(b"HOLE_PUNCH", (server_ip, server_port))
@@ -508,6 +519,10 @@ def close_udp_session():
         if audio_recv_thread_obj:
             audio_recv_thread_obj.join(timeout=1.0)
             audio_recv_thread_obj = None
+
+    # 清理全局状态，防止残留影响下次会话
+    room_members.clear()
+    p2p_status.clear()
 
 def start_realtime_audio(server_ip, server_port, username="", room_id=""):
     """
