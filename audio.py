@@ -261,132 +261,156 @@ def udp_audio_send_thread(udp_sock, server_ip, server_port, username, room_id):
         # p.terminate()
 
 
+def _mix_audio_chunks(chunks_list):
+    """
+    将多路 PCM int16 音频数据混合为单路输出。
+    对各路采样值逐点求和，然后裁剪到 int16 范围 [-32768, 32767]，防止溢出失真。
+    """
+    if not chunks_list:
+        return None
+    if len(chunks_list) == 1:
+        return chunks_list[0]
+
+    max_len = max(len(c) for c in chunks_list)
+    n_samples = max_len // 2
+
+    mixed = [0] * n_samples
+    for chunk in chunks_list:
+        n = len(chunk) // 2
+        samples = struct.unpack(f'<{n}h', chunk[:n * 2])
+        for i in range(n):
+            mixed[i] += samples[i]
+
+    for i in range(n_samples):
+        if mixed[i] > 32767:
+            mixed[i] = 32767
+        elif mixed[i] < -32768:
+            mixed[i] = -32768
+
+    return struct.pack(f'<{n_samples}h', *mixed)
+
+
 def udp_audio_recv_thread(udp_sock, username):
     """
     实时语音接收线程：负责从网络接收对方的音频数据并输出到本地扬声器。
-    （现已兼任 UDP 心跳与控制包的接收任务，保证在音频流关闭时网络不断）
+    支持多路音频混音：将来自不同来源的音频在混音缓冲区中按 PCM 采样值叠加后统一播放，
+    而非逐包串行写入（后者会导致多人同时说话时声音拉长）。
+    同时兼任 UDP 心跳与控制包的接收任务。
     """
     global udp_session_active, audio_stream_active, p2p_status, udp_voice_pause
     p = get_pyaudio()
     stream = None
-    
+
+    # === 混音缓冲区 ===
+    mix_sources = {}       # {source_key: [audio_bytes, ...]}
+    MIX_INTERVAL = CHUNK / VOICE_RATE  # 一个 chunk 的时长（秒），约 64ms
+    last_mix_time = time.time()
+
     try:
+        udp_sock.settimeout(MIX_INTERVAL)
+
         while udp_session_active:
-            # 阻塞等待网络端传来的音频/控制包 (最大缓冲 4096 字节)
-            data, addr = udp_sock.recvfrom(4096)
-            # 过滤掉由于打洞产生的 HOLE_PUNCH 包以及非正常大小的包
-            if data == b"HOLE_PUNCH" or len(data) == 0:
-                continue
-            
-            # P2P 打洞握手包处理
-            if data.startswith(b"P2P_HELLO "):
-                peer_name = data.split(b" ")[1].decode("utf-8")
-                ack_packet = f"P2P_HELLO_ACK {username}".encode("utf-8")
-                # 回复确认包
-                udp_sock.sendto(ack_packet, addr)
-                
-                # 记录为可用
-                if peer_name not in p2p_status:
-                    p2p_status[peer_name] = {'active': True, 'last_seen': time.time(), 'addr': addr}
-                else:
-                    p2p_status[peer_name]['active'] = True
-                    p2p_status[peer_name]['last_seen'] = time.time()
-                    p2p_status[peer_name]['addr'] = addr
-                continue
+            audio_data = None
+            source_key = None
 
-            if data.startswith(b"P2P_HELLO_ACK "):
-                peer_name = data.split(b" ")[1].decode("utf-8")
-                if peer_name not in p2p_status:
-                    p2p_status[peer_name] = {'active': True, 'last_seen': time.time(), 'addr': addr}
-                else:
-                    p2p_status[peer_name]['active'] = True
-                    p2p_status[peer_name]['last_seen'] = time.time()
-                    p2p_status[peer_name]['addr'] = addr
-                continue
+            try:
+                data, addr = udp_sock.recvfrom(4096)
+            except socket.timeout:
+                data = None
+                addr = None
 
-            if data.startswith(b"P2P_TEXT "):
-                parts = data.split(b" ", 2)
-                if len(parts) >= 3:
-                    sender = parts[1].decode("utf-8")
-                    msg = parts[2].decode("utf-8")
-                    out = (
-                        f"\n\n============= [UDP 测试通道: P2P 直连] ============="
-                        f"\n[{time.strftime('%H:%M:%S')}] 目标 {sender} 发来的原始穿透数据:"
-                        f"\n内容 -> {msg}"
-                        f"\n====================================================\n你> "
-                    )
-                    print(out, end="", flush=True)
-                continue
+            if data is not None:
+                if data == b"HOLE_PUNCH" or len(data) == 0:
+                    pass
 
-            if data.startswith(b"RELAY_DATA "):
-                payload = data[11:]
-                
-                # Check if it's our testing payload
-                if payload.startswith(b"RELAY_TEXT "):
-                    parts = payload.split(b" ", 2)
+                elif data.startswith(b"P2P_HELLO "):
+                    peer_name = data.split(b" ")[1].decode("utf-8")
+                    ack_packet = f"P2P_HELLO_ACK {username}".encode("utf-8")
+                    udp_sock.sendto(ack_packet, addr)
+                    if peer_name not in p2p_status:
+                        p2p_status[peer_name] = {'active': True, 'last_seen': time.time(), 'addr': addr}
+                    else:
+                        p2p_status[peer_name]['active'] = True
+                        p2p_status[peer_name]['last_seen'] = time.time()
+                        p2p_status[peer_name]['addr'] = addr
+
+                elif data.startswith(b"P2P_HELLO_ACK "):
+                    peer_name = data.split(b" ")[1].decode("utf-8")
+                    if peer_name not in p2p_status:
+                        p2p_status[peer_name] = {'active': True, 'last_seen': time.time(), 'addr': addr}
+                    else:
+                        p2p_status[peer_name]['active'] = True
+                        p2p_status[peer_name]['last_seen'] = time.time()
+                        p2p_status[peer_name]['addr'] = addr
+
+                elif data.startswith(b"P2P_TEXT "):
+                    parts = data.split(b" ", 2)
                     if len(parts) >= 3:
                         sender = parts[1].decode("utf-8")
                         msg = parts[2].decode("utf-8")
                         out = (
-                            f"\n\n============= [UDP 测试通道: RELAY 中继] ============="
-                            f"\n[{time.strftime('%H:%M:%S')}] 经由服务器转发接收自 {sender} 的数据:"
+                            f"\n\n============= [UDP 测试通道: P2P 直连] ============="
+                            f"\n[{time.strftime('%H:%M:%S')}] 目标 {sender} 发来的原始穿透数据:"
                             f"\n内容 -> {msg}"
-                            f"\n======================================================\n你> "
+                            f"\n====================================================\n你> "
                         )
                         print(out, end="", flush=True)
-                    continue
 
-                if audio_stream_active and not udp_voice_pause:
-                    if stream is None:
-                        stream = p.open(format=FORMAT, channels=CHANNELS, rate=VOICE_RATE, output=True, frames_per_buffer=CHUNK)
-                    stream.write(payload)
-                continue
+                elif data.startswith(b"RELAY_DATA "):
+                    payload = data[11:]
+                    if payload.startswith(b"RELAY_TEXT "):
+                        parts = payload.split(b" ", 2)
+                        if len(parts) >= 3:
+                            sender = parts[1].decode("utf-8")
+                            msg = parts[2].decode("utf-8")
+                            out = (
+                                f"\n\n============= [UDP 测试通道: RELAY 中继] ============="
+                                f"\n[{time.strftime('%H:%M:%S')}] 经由服务器转发接收自 {sender} 的数据:"
+                                f"\n内容 -> {msg}"
+                                f"\n======================================================\n你> "
+                            )
+                            print(out, end="", flush=True)
+                    else:
+                        audio_data = payload
+                        source_key = ("relay", addr)
 
-            if data.startswith(b"P2P_AUDIO "):
-                audio_data = data[10:]
-                if audio_stream_active and not udp_voice_pause:
-                    if stream is None:
-                        stream = p.open(format=FORMAT, channels=CHANNELS, rate=VOICE_RATE, output=True, frames_per_buffer=CHUNK)
-                    stream.write(audio_data)
-                continue
-            
-            # 假如本地并未点击“暂停声音”按钮才写入扬声器打出对方的声音
-            if audio_stream_active and not udp_voice_pause:
-                if stream is None:
-                    stream = p.open(format=FORMAT, channels=CHANNELS, rate=VOICE_RATE, output=True, frames_per_buffer=CHUNK)
-                stream.write(data)
-    except Exception as e:
-        # 调试排错输出
-        # print(f"\\n[接收线程异常] {e}")
+                elif data.startswith(b"P2P_AUDIO "):
+                    audio_data = data[10:]
+                    source_key = ("p2p", addr)
+
+                else:
+                    audio_data = data
+                    source_key = ("raw", addr)
+
+                # 将音频数据放入混音缓冲区
+                if audio_data and source_key and audio_stream_active and not udp_voice_pause:
+                    if source_key not in mix_sources:
+                        mix_sources[source_key] = []
+                    mix_sources[source_key].append(audio_data)
+
+            # === 定时混音输出 ===
+            now = time.time()
+            if now - last_mix_time >= MIX_INTERVAL:
+                last_mix_time = now
+                if mix_sources and audio_stream_active and not udp_voice_pause:
+                    source_audios = []
+                    for src_chunks in mix_sources.values():
+                        source_audios.append(b''.join(src_chunks))
+                    mixed = _mix_audio_chunks(source_audios)
+                    if mixed:
+                        if stream is None:
+                            stream = p.open(format=FORMAT, channels=CHANNELS,
+                                            rate=VOICE_RATE, output=True,
+                                            frames_per_buffer=CHUNK)
+                        stream.write(mixed)
+                    mix_sources.clear()
+
+    except Exception:
         pass
     finally:
-        # 退出流与声卡资源
         if stream:
             stream.stop_stream()
             stream.close()
-        # p.terminate()
-
-def init_udp_session(server_ip, server_port, username, room_id=""):
-    global udp_session_active, udp_voice_socket, last_server_ip, last_server_port, p2p_thread_obj
-    with audio_state_lock:
-        if udp_session_active: return
-        
-        last_server_ip = server_ip
-        last_server_port = server_port
-        
-        udp_session_active = True
-        udp_voice_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        
-        if username:
-            udp_voice_socket.sendto(f"STUN_HELLO {username}".encode("utf-8"), (server_ip, server_port))
-
-        for _ in range(5):
-            udp_voice_socket.sendto(b"HOLE_PUNCH", (server_ip, server_port))
-            time.sleep(0.1)
-
-        if room_id:
-            p2p_thread_obj = threading.Thread(target=p2p_maintenance_thread, args=(udp_voice_socket, username), daemon=True)
-            p2p_thread_obj.start()
 
 last_username = ""
 last_room_id = ""

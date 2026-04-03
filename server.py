@@ -853,6 +853,12 @@ def handle_client(client_sock: socket.socket, addr: tuple):
                 if len(parts) == 2:
                     room_id = parts[1].strip()
                     handle_room_quit(username, room_id, client_sock)
+                else:
+                    # 未提供房间号时，自动查找用户所在的房间并退出
+                    with rooms_lock:
+                        user_rooms = [rid for rid, r in rooms.items() if username in r["members"]]
+                    for rid in user_rooms:
+                        handle_room_quit(username, rid, client_sock)
             elif text.startswith("/ROOM_RELAY_REQUEST "):
                 parts = text.split(" ", 2)
                 if len(parts) == 3:
