@@ -10,6 +10,7 @@ import time
 import time
 import math
 import struct
+import select
 
 try:
     import audioop
@@ -165,7 +166,7 @@ def test_p2p_or_relay(username, target, use_p2p, message):
             print("\n[测试] 缺少服务器 NAT 信息，无法使用中继发送。")
             return
             
-        header = f"RELAY {target} RELAY_TEXT {username} ".encode("utf-8")
+        header = f"RELAY {username} {target} RELAY_TEXT {username} ".encode("utf-8")
         packet = header + msg_bytes
         try:
             udp_voice_socket.sendto(packet, (last_server_ip, last_server_port))
@@ -225,10 +226,10 @@ def udp_audio_send_thread(udp_sock, server_ip, server_port, username, room_id):
                 rms_val = get_rms(data)
                 if rms_val > SILENCE_THRESHOLD:
                     if room_id:
-                        # 房间模式：统一通过服务器 RELAY 中转
+                        # 房间模式：统一通过服务器 RELAY 中转（包含发送者名字供服务器反向注册）
                         for target in list(room_members):
                             if target != username:
-                                header = f"RELAY {target} ".encode("utf-8")
+                                header = f"RELAY {username} {target} ".encode("utf-8")
                                 packet = header + data
                                 udp_sock.sendto(packet, (server_ip, server_port))
                     else:
@@ -291,17 +292,19 @@ def udp_audio_recv_thread(udp_sock, username):
     last_mix_time = time.time()
 
     try:
-        udp_sock.settimeout(MIX_INTERVAL)
-
         while udp_session_active:
             audio_data = None
             source_key = None
 
             try:
-                data, addr = udp_sock.recvfrom(4096)
-            except socket.timeout:
-                data = None
-                addr = None
+                ready = select.select([udp_sock], [], [], MIX_INTERVAL)
+                if ready[0]:
+                    data, addr = udp_sock.recvfrom(4096)
+                else:
+                    data = None
+                    addr = None
+            except (OSError, ValueError):
+                break
 
             if data is not None:
                 if data == b"HOLE_PUNCH" or len(data) == 0:

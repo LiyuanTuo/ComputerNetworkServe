@@ -717,22 +717,31 @@ def room_udp_worker(room_id: str):
                         broadcast_room_members(room_id)
                 continue
                 
-            # 中断/降级中继包 (带有 target_name 的二进制音频)
-            # 格式约定: b"RELAY target_name " + payload
+            # 中断/降级中继包 (带有 sender_name 和 target_name 的二进制音频)
+            # 格式约定: b"RELAY sender_name target_name " + payload
             if data.startswith(b"RELAY "):
-                # 分割前两段：b"RELAY", b"target_name"
-                parts = data.split(b' ', 2)
-                if len(parts) >= 3:
-                    target_name = parts[1].decode(ENCODING)
-                    payload = parts[2]
+                parts = data.split(b' ', 3)
+                if len(parts) >= 4:
+                    sender_name = parts[1].decode(ENCODING)
+                    target_name = parts[2].decode(ENCODING)
+                    payload = parts[3]
                     
                     with rooms_lock:
-                        if room_id in rooms and target_name in rooms[room_id]["members"]:
-                            target_addr = rooms[room_id]["members"][target_name]
-                            if target_addr:  # 防止地址为 None（STUN_HELLO 尚未到达）
-                                try:
-                                    relay_sock.sendto(b"RELAY_DATA " + payload, target_addr)
-                                except: pass
+                        if room_id in rooms:
+                            # 自动注册/更新发送者的 NAT 地址（备份 STUN_HELLO）
+                            if sender_name in rooms[room_id]["members"]:
+                                old_sender_addr = rooms[room_id]["members"][sender_name]
+                                if old_sender_addr != addr:
+                                    rooms[room_id]["members"][sender_name] = addr
+                                    # 异步广播更新（不在锁内做）
+                                    threading.Thread(target=broadcast_room_members, args=(room_id,), daemon=True).start()
+                            
+                            if target_name in rooms[room_id]["members"]:
+                                target_addr = rooms[room_id]["members"][target_name]
+                                if target_addr:
+                                    try:
+                                        relay_sock.sendto(b"RELAY_DATA " + payload, target_addr)
+                                    except: pass
 
         except Exception:
             break

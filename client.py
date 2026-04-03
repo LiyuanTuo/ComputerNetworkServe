@@ -142,9 +142,12 @@ def receive_messages(sock: socket.socket, stop_event: threading.Event, server_ip
                             members_list = json.loads(parts[2])
                             member_names = [m["name"] for m in members_list]
                             
-                            # 更新全局 member dict (in audio.py)
-                            room_members.clear()
-                            room_members.update({m["name"]: (m["ip"], m["port"]) for m in members_list})
+                            # 原子更新全局 member dict：先加新成员再删旧成员，避免 clear() 导致发送线程读到空字典
+                            new_members = {m["name"]: (m["ip"], m["port"]) for m in members_list}
+                            room_members.update(new_members)
+                            for old_key in list(room_members.keys()):
+                                if old_key not in new_members:
+                                    room_members.pop(old_key, None)
                             
                             print(f"\r[会议室 {room_id}] 当前成员: {', '.join(member_names)}")
                         except Exception:
