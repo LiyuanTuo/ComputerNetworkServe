@@ -229,8 +229,8 @@ def udp_audio_send_thread(udp_sock, server_ip, server_port, username, room_id):
                 
                 if rms_val > SILENCE_THRESHOLD:
                     now = time.time()
-                    if now - last_send_print_time > 1.5:
-                        print(f"\r[调试] 🎤麦克风已采集 {len(data)}B (RMS:{rms_val:.0f}) | [监控] 您正在说话...".ljust(70))
+                    if now - last_send_print_time > 2.0:
+                        print(f"\n[监控] 🎤 发送音频中... 包大小:{len(data)}B, 音量RMS:{rms_val:.0f}")
                         print("你> ", end="", flush=True)
                         last_send_print_time = now
 
@@ -238,7 +238,8 @@ def udp_audio_send_thread(udp_sock, server_ip, server_port, username, room_id):
                         # 房间模式：统一通过服务器 RELAY 中转
                         for target in list(room_members):
                             if target != username:
-                                header = f"RELAY {target} ".encode("utf-8")
+                                # 服务端需要: RELAY <sender> <target> <payload>
+                                header = f"RELAY {username} {target} ".encode("utf-8")
                                 packet = header + data
                                 udp_sock.sendto(packet, (server_ip, server_port))
                     else:
@@ -383,13 +384,13 @@ def udp_audio_recv_thread(udp_sock, username):
                         mix_sources[source_key] = []
                     mix_sources[source_key].append(audio_data)
 
-                    # 间隔 1.5 秒打印一次谁正在说话，避免控制台被刷屏
+                    # 间隔 2 秒打印一次谁正在说话，避免控制台被刷屏
                     now = time.time()
-                    if source_key not in last_recv_print_time or (now - last_recv_print_time[source_key] > 1.5):
+                    if source_key not in last_recv_print_time or (now - last_recv_print_time[source_key] > 2.0):
                         speaker_label = "对方/某人"
                         if isinstance(source_key, tuple) and len(source_key) == 2:
                             speaker_label = f"地址 {source_key[1]}"
-                        print(f"\r[调试] 📡接收到语音数据来自 {speaker_label}".ljust(70))
+                        print(f"\n[监控] 📡 接收到语音来自 {speaker_label} (包大小:{len(audio_data)}B)")
                         print("你> ", end="", flush=True)
                         last_recv_print_time[source_key] = now
 
@@ -409,8 +410,8 @@ def udp_audio_recv_thread(udp_sock, username):
                                             frames_per_buffer=CHUNK)
                         stream.write(mixed)
                         # 间隔打印扬声器播放
-                        if now - last_recv_print_time.get("speaker_mix", 0) > 1.5:
-                            print(f"\r[调试] 🔊扬声器播放混合音频 {len(mixed)}B".ljust(70))
+                        if now - last_recv_print_time.get("speaker_mix", 0) > 4.0:
+                            print(f"\n[监控] 🔊 扬声器播放中... (混音大小:{len(mixed)}B)")
                             print("你> ", end="", flush=True)
                             last_recv_print_time["speaker_mix"] = now
                     mix_sources.clear()

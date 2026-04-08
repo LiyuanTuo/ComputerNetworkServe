@@ -694,6 +694,9 @@ def room_udp_worker(room_id: str):
         if room_id not in rooms: return
         relay_sock = rooms[room_id]["relay_sock"]
 
+    print(f"[{timestamp()}] [房间调试] 房间 {room_id} 的 UDP 监听线程已启动，端口: {relay_sock.getsockname()[1]}")
+    last_print_time = 0
+
     while True:
         try:
             data, addr = relay_sock.recvfrom(BUFFER_SIZE)
@@ -712,6 +715,7 @@ def room_udp_worker(room_id: str):
                                 rooms[room_id]["members"][username] = addr
                                 addr_changed = True
                     if addr_changed:
+                        print(f"[{timestamp()}] [房间调试] {room_id} 登记/更新了用户 '{username}' 的 NAT 地址: {addr}")
                         save_rooms()
                         # 仅在地址发生变化时才广播更新
                         broadcast_room_members(room_id)
@@ -720,6 +724,12 @@ def room_udp_worker(room_id: str):
             # 中断/降级中继包 (带有 sender_name 和 target_name 的二进制音频)
             # 格式约定: b"RELAY sender_name target_name " + payload
             if data.startswith(b"RELAY "):
+                import time
+                now = time.time()
+                if now - last_print_time > 2.0:
+                    print(f"[{timestamp()}] [房间调试] {room_id} 正在转发来自 {addr} 的音频流 (大小: {len(data)}B)")
+                    last_print_time = now
+
                 parts = data.split(b' ', 3)
                 if len(parts) >= 4:
                     sender_name = parts[1].decode(ENCODING)
