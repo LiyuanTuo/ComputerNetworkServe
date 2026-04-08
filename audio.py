@@ -10,7 +10,6 @@ import time
 import time
 import math
 import struct
-import select
 
 try:
     import audioop
@@ -166,7 +165,7 @@ def test_p2p_or_relay(username, target, use_p2p, message):
             print("\n[测试] 缺少服务器 NAT 信息，无法使用中继发送。")
             return
             
-        header = f"RELAY {username} {target} RELAY_TEXT {username} ".encode("utf-8")
+        header = f"RELAY {target} RELAY_TEXT {username} ".encode("utf-8")
         packet = header + msg_bytes
         try:
             udp_voice_socket.sendto(packet, (last_server_ip, last_server_port))
@@ -214,6 +213,7 @@ def udp_audio_send_thread(udp_sock, server_ip, server_port, username, room_id):
                     input=True,
                     frames_per_buffer=CHUNK)
     # 不要在后台线程随意穿插 print 和 输入提示符，会打乱界面的 "你> "
+    last_send_print_time = 0
     try:
         # 当语音通话处于激活状态时，持续采集并发送
         while audio_stream_active:
@@ -224,19 +224,28 @@ def udp_audio_send_thread(udp_sock, server_ip, server_port, username, room_id):
             if not udp_voice_pause and not udp_voice_mute:
                 # VAD: 计算音量能量（RMS），低于阈值则不发包（静音滤除，节省带宽）
                 rms_val = get_rms(data)
+                # 可解除注释用于调试麦克风采样：
+                print(f"\n[音频采样] 麦克风RMS值: {rms_val} ", end='')
+                
                 if rms_val > SILENCE_THRESHOLD:
+                    now = time.time()
+                    if now - last_send_print_time > 1.5:
+                        print(f"\r[监控] 您正在说话... (麦克风音量/RMS: {rms_val:.0f})")
+                        print("你> ", end="", flush=True)
+                        last_send_print_time = now
+
                     if room_id:
-                        # 房间模式：统一通过服务器 RELAY 中转（包含发送者名字供服务器反向注册）
+                        # 房间模式：统一通过服务器 RELAY 中转
                         for target in list(room_members):
                             if target != username:
-                                header = f"RELAY {username} {target} ".encode("utf-8")
+                                header = f"RELAY {target} ".encode("utf-8")
                                 packet = header + data
                                 udp_sock.sendto(packet, (server_ip, server_port))
                     else:
                         # 点对点原逻辑（如果有）直接发
                         udp_sock.sendto(data, (server_ip, server_port))
     except Exception as e:
-        # print(f"\\n[发送线程异常] {e}")
+        print(f"\\n[发送线程异常] {e}")
         pass
     finally:
         # 退出循环后安全释放声卡及流资源
@@ -290,23 +299,23 @@ def udp_audio_recv_thread(udp_sock, username):
     mix_sources = {}       # {source_key: [audio_bytes, ...]}
     MIX_INTERVAL = CHUNK / VOICE_RATE  # 一个 chunk 的时长（秒），约 64ms
     last_mix_time = time.time()
+    last_recv_print_time = {}
 
     try:
+        udp_sock.settimeout(MIX_INTERVAL)
+
         while udp_session_active:
             audio_data = None
             source_key = None
 
             try:
-                ready = select.select([udp_sock], [], [], MIX_INTERVAL)
-                if ready[0]:
-                    data, addr = udp_sock.recvfrom(4096)
-                else:
-                    data = None
-                    addr = None
-            except (OSError, ValueError):
-                break
+                data, addr = udp_sock.recvfrom(4096)
+            except socket.timeout:
+                data = None
+                addr = None
 
             if data is not None:
+                # print(f"\\r[接收线程] 收到 {len(data)} bytes 数据，来自 {addr}", end='')
                 if data == b"HOLE_PUNCH" or len(data) == 0:
                     pass
 
@@ -374,6 +383,16 @@ def udp_audio_recv_thread(udp_sock, username):
                     if source_key not in mix_sources:
                         mix_sources[source_key] = []
                     mix_sources[source_key].append(audio_data)
+
+                    # 间隔 1.5 秒打印一次谁正在说话，避免控制台被刷屏
+                    now = time.time()
+                    if source_key not in last_recv_print_time or (now - last_recv_print_time[source_key] > 1.5):
+                        speaker_label = "对方/某人"
+                        if isinstance(source_key, tuple) and len(source_key) == 2:
+                            speaker_label = f"地址 {source_key[1]}"
+                        print(f"\r[监控] 正在接收语音数据... ({speaker_label} 正在说话)")
+                        print("你> ", end="", flush=True)
+                        last_recv_print_time[source_key] = now
 
             # === 定时混音输出 ===
             now = time.time()
