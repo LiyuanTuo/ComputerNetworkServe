@@ -695,7 +695,7 @@ def room_udp_worker(room_id: str):
         relay_sock = rooms[room_id]["relay_sock"]
 
     print(f"[{timestamp()}] [房间调试] 房间 {room_id} 的 UDP 监听线程已启动，端口: {relay_sock.getsockname()[1]}")
-    last_print_time = 0
+    last_print_time = {}
 
     while True:
         try:
@@ -726,9 +726,9 @@ def room_udp_worker(room_id: str):
             if data.startswith(b"RELAY "):
                 import time
                 now = time.time()
-                if now - last_print_time > 2.0:
+                if now - last_print_time.get(addr, 0) > 2.0:
                     print(f"[{timestamp()}] [房间调试] {room_id} 正在转发来自 {addr} 的音频流 (大小: {len(data)}B)")
-                    last_print_time = now
+                    last_print_time[addr] = now
 
                 parts = data.split(b' ', 3)
                 if len(parts) >= 4:
