@@ -749,7 +749,8 @@ def room_udp_worker(room_id: str):
 
 def handle_room_create(username: str, client_sock: socket.socket):
     """创建新会议室并返回房间号及 UDP 端口"""
-    room_id = str(uuid.uuid4())[:6].upper()
+    # room_id = str(uuid.uuid4())[:6].upper()
+    room_id = "888888"  # 调试期固定房间号
     relay_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     relay_sock.bind((HOST, 0))
     relay_port = relay_sock.getsockname()[1]
