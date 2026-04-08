@@ -224,13 +224,13 @@ def udp_audio_send_thread(udp_sock, server_ip, server_port, username, room_id):
             if not udp_voice_pause and not udp_voice_mute:
                 # VAD: 计算音量能量（RMS），低于阈值则不发包（静音滤除，节省带宽）
                 rms_val = get_rms(data)
-                # 可解除注释用于调试麦克风采样：
-                print(f"\n[音频采样] 麦克风RMS值: {rms_val} ", end='')
+                # 简短的调试输出: 麦克风接收
+                # print(f"\r[调试] 🎤麦克风已采集 {len(data)}B (RMS:{rms_val:.0f})".ljust(50), end="")
                 
                 if rms_val > SILENCE_THRESHOLD:
                     now = time.time()
                     if now - last_send_print_time > 1.5:
-                        print(f"\r[监控] 您正在说话... (麦克风音量/RMS: {rms_val:.0f})")
+                        print(f"\r[调试] 🎤麦克风已采集 {len(data)}B (RMS:{rms_val:.0f}) | [监控] 您正在说话...".ljust(70))
                         print("你> ", end="", flush=True)
                         last_send_print_time = now
 
@@ -315,7 +315,6 @@ def udp_audio_recv_thread(udp_sock, username):
                 addr = None
 
             if data is not None:
-                # print(f"\\r[接收线程] 收到 {len(data)} bytes 数据，来自 {addr}", end='')
                 if data == b"HOLE_PUNCH" or len(data) == 0:
                     pass
 
@@ -390,7 +389,7 @@ def udp_audio_recv_thread(udp_sock, username):
                         speaker_label = "对方/某人"
                         if isinstance(source_key, tuple) and len(source_key) == 2:
                             speaker_label = f"地址 {source_key[1]}"
-                        print(f"\r[监控] 正在接收语音数据... ({speaker_label} 正在说话)")
+                        print(f"\r[调试] 📡接收到语音数据来自 {speaker_label}".ljust(70))
                         print("你> ", end="", flush=True)
                         last_recv_print_time[source_key] = now
 
@@ -409,6 +408,11 @@ def udp_audio_recv_thread(udp_sock, username):
                                             rate=VOICE_RATE, output=True,
                                             frames_per_buffer=CHUNK)
                         stream.write(mixed)
+                        # 间隔打印扬声器播放
+                        if now - last_recv_print_time.get("speaker_mix", 0) > 1.5:
+                            print(f"\r[调试] 🔊扬声器播放混合音频 {len(mixed)}B".ljust(70))
+                            print("你> ", end="", flush=True)
+                            last_recv_print_time["speaker_mix"] = now
                     mix_sources.clear()
 
     except Exception:
