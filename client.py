@@ -422,14 +422,17 @@ def start_client():
                     client_sock.sendall(f"/ROOM_QUIT {quit_room_id}".encode(ENCODING))
                 else:
                     client_sock.sendall("/ROOM_QUIT".encode(ENCODING))
+                
+                # 退出房间后应该停止这边的语音收发
+                stop_audio_stream()
+                close_udp_session()
                 continue
 
             elif msg.lower().startswith("/open_voice"):
                 if not current_room_id:
                     print("[系统] 您当前不在会议室中，无法开启语音。")
                     continue
-                start_audio_stream()
-                set_mute(False)
+                set_mute(False)  # 仅需解除静音，底层发送线程已经运行，只需放行数据
                 client_sock.sendall(msg.encode(ENCODING))
                 continue
 
@@ -437,8 +440,7 @@ def start_client():
                 if not current_room_id:
                     print("[系统] 您当前不在会议室中。")
                     continue
-                stop_audio_stream()
-                set_mute(True)
+                set_mute(True)  # 仅需开启静音，保留接收线程和扬声器工作
                 client_sock.sendall(msg.encode(ENCODING))
                 continue
 
@@ -446,7 +448,10 @@ def start_client():
                 # 如果在会议室中，需要通知服务器退出房间
                 if current_room_id:
                     client_sock.sendall(f"/ROOM_QUIT {current_room_id}".encode(ENCODING))
-                close_udp_session()
+                
+                # 无论是实时一对一挂断还是退出房间，清理底层连接及音频线程
+                stop_audio_stream()   # 停止发送和接收线程 (关闭麦克风、听筒)
+                close_udp_session()   # 销毁 UDP 套接字释放端口
                 current_room_id = ""
                 # 会交给服务器去广播结束消息
 

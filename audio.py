@@ -404,19 +404,24 @@ def udp_audio_recv_thread(udp_sock, username):
                         source_audios.append(b''.join(src_chunks))
                     mixed = _mix_audio_chunks(source_audios)
                     if mixed:
-                        if stream is None:
-                            stream = p.open(format=FORMAT, channels=CHANNELS,
-                                            rate=VOICE_RATE, output=True,
-                                            frames_per_buffer=CHUNK)
-                        stream.write(mixed)
-                        # 间隔打印扬声器播放
-                        if now - last_recv_print_time.get("speaker_mix", 0) > 4.0:
-                            print(f"\n[监控] 🔊 扬声器播放中... (混音大小:{len(mixed)}B)")
-                            print("你> ", end="", flush=True)
-                            last_recv_print_time["speaker_mix"] = now
+                        try:
+                            if stream is None:
+                                stream = p.open(format=FORMAT, channels=CHANNELS,
+                                                rate=VOICE_RATE, output=True,
+                                                frames_per_buffer=CHUNK)
+                                print(f"\n[音频系统] 成功打开播放设备 (Rate:{VOICE_RATE}, Channels:{CHANNELS})")
+                            stream.write(mixed)
+                            # 间隔打印扬声器播放
+                            if now - last_recv_print_time.get("speaker_mix", 0) > 4.0:
+                                print(f"\n[监控] 🔊 扬声器播放中... (混音大小:{len(mixed)}B)")
+                                print("你> ", end="", flush=True)
+                                last_recv_print_time["speaker_mix"] = now
+                        except Exception as e:
+                            print(f"\n[监控] 🚨扬声器播放抛出异常: {e}")
                     mix_sources.clear()
 
-    except Exception:
+    except Exception as e:
+        print(f"\n[音频系统] 接收/播放线程发生崩溃: {e}")
         pass
     finally:
         if stream:
