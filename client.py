@@ -117,11 +117,11 @@ def receive_messages(sock: socket.socket, stop_event: threading.Event, server_ip
                     room_id = parts[1]
                     server_udp_port = int(parts[2].strip())
                     current_room_id = room_id
-                    print(f"\r[系统] 会议室 {room_id} 内 UDP 中继/直连通道建立中... (默认开麦)")
+                    print(f"\r[系统] 会议室 {room_id} 内 UDP 中继/直连通道建立中... (默认静音)")
                     need_prompt = True
                     init_udp_session(server_ip, server_udp_port, client_username, room_id)
-                    set_mute(False)  # 默认开麦以便于调试，如果是默认静音应该传True
-                    start_audio_stream()
+                    set_mute(True)
+                    start_audio_stream()  # 必须启动流才能收到别人的声音
                     continue
 
                 elif line.startswith("/ROOM_JOINED "):
@@ -129,11 +129,11 @@ def receive_messages(sock: socket.socket, stop_event: threading.Event, server_ip
                     room_id = parts[1]
                     server_udp_port = int(parts[2].strip())
                     current_room_id = room_id
-                    print(f"\r[系统] 成功打通 UDP 信令交互，房间 {room_id} 语音通道建立中... (默认开麦)")
+                    print(f"\r[系统] 成功打通 UDP 信令交互，房间 {room_id} 语音通道建立中... (默认静音)")
                     need_prompt = True
                     init_udp_session(server_ip, server_udp_port, client_username, room_id)
-                    set_mute(False)
-                    start_audio_stream()
+                    set_mute(True)
+                    start_audio_stream()  # 同上，确保接收线程能正常运行并播放
                     continue
 
                 elif line.startswith("/ROOM_MEMBERS "):
