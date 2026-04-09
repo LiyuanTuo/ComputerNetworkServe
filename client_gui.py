@@ -44,7 +44,7 @@ class VoiceChatApp:
         # 网络相关
         self.client_sock = None
         self.current_user = None
-        self.server_ip = "10.192.4.172" # 默认改为127.0.0.1或者保留原IP
+        self.server_ip = "10.198.4.172" # 默认改为127.0.0.1或者保留原IP
         self.port = 9999
         self.stop_event = threading.Event()
         self.current_pending_port = None
@@ -211,6 +211,10 @@ class VoiceChatApp:
         tk.Button(room_action, text="创建", bg=COLORS["accent"], fg="white",
                   font=("微软雅黑", 8), relief="flat", cursor="hand2", padx=4,
                   command=self._room_create_sidebar).pack(side="left", padx=2)
+                  
+        tk.Button(room_action, text="退出", bg=COLORS["danger"], fg="white",
+                  font=("微软雅黑", 8), relief="flat", cursor="hand2", padx=4,
+                  command=self._room_quit_sidebar).pack(side="left", padx=2)
 
         # 底部操作栏
         bot_bar = tk.Frame(sidebar, bg=COLORS["card"], pady=6, padx=10)
@@ -314,6 +318,8 @@ class VoiceChatApp:
             w.destroy()
 
         self._add_contact_row("广播", "online", is_broadcast=True)
+        if hasattr(self, 'current_room_id') and self.current_room_id:
+            self._add_contact_row(f"会议室_{self.current_room_id}", "online", is_broadcast=True)
 
         if not self.contact_status:
             tk.Label(self.contacts_inner, text="暂无联系人\n使用上方「＋添加」按钮", bg=COLORS["card"],
@@ -531,6 +537,70 @@ class VoiceChatApp:
                         self.root.after(0, lambda t=target, p=udp_port: self.on_call_accepted(t, p))
                         continue
 
+                    if line.startswith("/ROOM_CREATED "):
+                        parts = line.split(" ")
+                        room_id = parts[1]
+                        server_udp_port = int(parts[2].strip())
+                        self.current_room_id = room_id
+                        room_name = f"会议室_{room_id}"
+                        if room_name not in self.chat_history:
+                            self.chat_history[room_name] = []
+                        self.append_to_history(room_name, f"[系统] 会议室 {room_id} 已创建", "system")
+                        def setup_room():
+                            try:
+                                from audio import init_udp_session, start_audio_stream, set_mute
+                                init_udp_session(self.server_ip, server_udp_port, self.current_user, room_id)
+                                set_mute(True)
+                                start_audio_stream()
+                            except Exception as e:
+                                self.append_to_history(room_name, f"[系统] 房间音视频初始化失败: {e}", "system")
+                        self.root.after(0, setup_room)
+                        self.root.after(0, self.refresh_contacts_ui)
+                        self.root.after(0, lambda r=room_name: self.select_contact(r))
+                        continue
+
+                    if line.startswith("/ROOM_JOINED "):
+                        parts = line.split(" ")
+                        room_id = parts[1]
+                        server_udp_port = int(parts[2].strip())
+                        self.current_room_id = room_id
+                        room_name = f"会议室_{room_id}"
+                        if room_name not in self.chat_history:
+                            self.chat_history[room_name] = []
+                        self.append_to_history(room_name, f"[系统] 已成功加入会议室 {room_id}", "system")
+                        def join_room():
+                            try:
+                                from audio import init_udp_session, start_audio_stream, set_mute
+                                init_udp_session(self.server_ip, server_udp_port, self.current_user, room_id)
+                                set_mute(True)
+                                start_audio_stream()
+                            except Exception as e:
+                                self.append_to_history(room_name, f"[系统] 房间音视频初始化失败: {e}", "system")
+                        self.root.after(0, join_room)
+                        self.root.after(0, self.refresh_contacts_ui)
+                        self.root.after(0, lambda r=room_name: self.select_contact(r))
+                        continue
+
+                    if line.startswith("/ROOM_MEMBERS "):
+                        parts = line.split(" ", 2)
+                        if len(parts) >= 3:
+                            room_id = parts[1]
+                            try:
+                                import json
+                                members_list = json.loads(parts[2])
+                                member_names = [m["name"] for m in members_list]
+                                room_name = f"会议室_{room_id}"
+                                self.append_to_history(room_name, f"[会议室 {room_id}] 当前成员: {', '.join(member_names)}", "system")
+                                from audio import room_members
+                                new_members = {m["name"]: (m["ip"], m["port"]) for m in members_list}
+                                room_members.update(new_members)
+                                for old_key in list(room_members.keys()):
+                                    if old_key not in new_members:
+                                        room_members.pop(old_key, None)
+                            except Exception:
+                                pass
+                        continue
+
                     if "AUDIO:" in line:
                         prefix, b64_audio = line.split("AUDIO:", 1)
                         target = "广播"
@@ -679,9 +749,19 @@ class VoiceChatApp:
 
     def _room_quit_sidebar(self):
         if hasattr(self, 'current_room_id') and self.current_room_id:
-            self.client_sock.sendall(f'/ROOM_QUIT {self.current_room_id}'.encode('utf-8'))
-            from audio import set_mute
-            set_mute(True)
+            try:
+                self.client_sock.sendall(f'/ROOM_QUIT {self.current_room_id}'.encode('utf-8'))
+            except Exception: pass
+            
+            from audio import close_udp_session
+            close_udp_session()
+            
+            room_name = f"会议室_{self.current_room_id}"
+            self.append_to_history(room_name, "[系统] 正在退出会议室...", "system")
+            self.current_room_id = None
+            if self.current_chat_target == room_name:
+                self.select_contact("广播")
+            self.refresh_contacts_ui()
 
     def _room_open_mic(self):
         if hasattr(self, 'current_room_id') and self.current_room_id:
