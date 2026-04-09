@@ -89,7 +89,7 @@ def play_audio(filename):
         # p.terminate()
         wf.close()
     except Exception as e:
-        print(f"\n[系统] 播放音频失败: {e}")
+        _log_to_ui(f"播放音频失败: {e}")
 
 # ================= 实时语音连麦功能模块 ================
 
@@ -99,8 +99,20 @@ audio_stream_active = False
 udp_voice_socket = None
 VOICE_RATE = 16000  # 实时语音优化采样率
 
+ui_logger = None  # 用于向 GUI 界面输出中间变量的日志回调函数
+
+def set_ui_logger(logger_func):
+    global ui_logger
+    ui_logger = logger_func
+
+def _log_to_ui(msg):
+    if ui_logger:
+        ui_logger(msg)
+    # else:
+    #     print(msg) # 全局注释掉终端打印
+
 audio_state_lock = threading.Lock()
-p2p_thread_obj = None
+nat_thread_obj = None
 audio_send_thread_obj = None
 audio_recv_thread_obj = None
 
@@ -110,7 +122,7 @@ udp_voice_pause = False  # 会话暂停状态 (不发声音，不播放声音)
 pending_mute = False
 pending_pause = False
 room_members = {}        # {用户名: (ip, port)}
-p2p_status = {}          # {用户名: {"active": bool, "last_seen": float, "addr": (ip, port)}}
+          # {用户名: {"active": bool, "last_seen": float, "addr": (ip, port)}}
 last_server_ip = ""
 last_server_port = 0
 
@@ -122,8 +134,8 @@ def set_mute(state):
             return
         if udp_voice_mute != state:
             udp_voice_mute = state
-            print(f"\r[音频系统] 麦克风状态 -> {'静音' if state else '开启'}")
-            print("你> ", end="", flush=True)
+            _log_to_ui(f"[音频系统] 麦克风状态 -> {'静音' if state else '开启'}")
+            
 
 def set_pause(state):
     global udp_voice_pause, pending_pause, audio_stream_active
@@ -133,45 +145,9 @@ def set_pause(state):
             return
         if udp_voice_pause != state:
             udp_voice_pause = state
-            print(f"\r[音频系统] 语音状态 -> {'暂停' if state else '开启'}")
-            print("你> ", end="", flush=True)
-
-
-def test_p2p_or_relay(username, target, use_p2p, message):
-    """
-    测试功能：发送纯文本 UDP 消息来验证 P2P 或中继
-    """
-    global udp_session_active, udp_voice_socket, p2p_status, last_server_ip, last_server_port
-    if not udp_session_active or not udp_voice_socket:
-        print("\n[系统] 未加入会议室或 UDP 通道未打通，无法测试。")
-        return
-        
-    msg_bytes = message.encode("utf-8")
-    
-    if use_p2p:
-        status = p2p_status.get(target)
-        if status and status.get("active") and status.get("addr"):
-            packet = f"P2P_TEXT {username} ".encode("utf-8") + msg_bytes
-            try:
-                udp_voice_socket.sendto(packet, status["addr"])
-                print(f"\n[测试] 已尝试通过 P2P 隧道向 {target} 发送文本：{message}")
-            except Exception as e:
-                print(f"\n[测试] P2P 发送失败：{e}")
-        else:
-            print(f"\n[测试] 无法向 {target} 发送 P2P 测试，通道尚未打通 (或已超时)。")
-    else:
-        # 中继测试
-        if not last_server_ip or not last_server_port:
-            print("\n[测试] 缺少服务器 NAT 信息，无法使用中继发送。")
-            return
+            _log_to_ui(f"[音频系统] 语音状态 -> {'暂停' if state else '开启'}")
             
-        header = f"RELAY {target} RELAY_TEXT {username} ".encode("utf-8")
-        packet = header + msg_bytes
-        try:
-            udp_voice_socket.sendto(packet, (last_server_ip, last_server_port))
-            print(f"\n[测试] 已尝试通过服务器 RELAY 中转向 {target} 发送文本：{message}")
-        except Exception as e:
-            print(f"\n[测试] RELAY 发送失败：{e}")
+
 
 # 全局 Pyaudio 对象，避免在多个线程中同时初始化导致 C 语言层面发生 Segfault 卡退
 _pyaudio_instance = None
@@ -184,7 +160,7 @@ def get_pyaudio():
             _pyaudio_instance = pyaudio.PyAudio()
         return _pyaudio_instance
 
-def p2p_maintenance_thread(udp_sock, username):
+def nat_maintenance_thread(udp_sock, username):
     """
     NAT 地址维护线程：定期向服务器重发 STUN_HELLO 以确保 NAT 地址注册不因丢包而失效。
     所有音频数据均通过服务器 RELAY 中转。
@@ -230,23 +206,19 @@ def udp_audio_send_thread(udp_sock, server_ip, server_port, username, room_id):
                 if rms_val > SILENCE_THRESHOLD:
                     now = time.time()
                     if now - last_send_print_time > 2.0:
-                        print(f"\n[监控] 🎤 发送音频中... 包大小:{len(data)}B, 音量RMS:{rms_val:.0f}")
-                        print("你> ", end="", flush=True)
+                        _log_to_ui(f"[发送] 音量: {rms_val:.0f} 包大小: {len(data)}B")
+                        
                         last_send_print_time = now
 
-                    if room_id:
-                        # 房间模式：统一通过服务器 RELAY 中转
+                    if True:
+                        # 统一通过服务器 RELAY 中转
                         for target in list(room_members):
                             if target != username:
-                                # 服务端需要: RELAY <sender> <target> <payload>
                                 header = f"RELAY {username} {target} ".encode("utf-8")
                                 packet = header + data
                                 udp_sock.sendto(packet, (server_ip, server_port))
-                    else:
-                        # 点对点原逻辑（如果有）直接发
-                        udp_sock.sendto(data, (server_ip, server_port))
     except Exception as e:
-        print(f"\\n[发送线程异常] {e}")
+        _log_to_ui(f"\\n[发送线程异常] {e}")
         pass
     finally:
         # 退出循环后安全释放声卡及流资源
@@ -318,40 +290,6 @@ def udp_audio_recv_thread(udp_sock, username):
             if data is not None:
                 if data == b"HOLE_PUNCH" or len(data) == 0:
                     pass
-
-                elif data.startswith(b"P2P_HELLO "):
-                    peer_name = data.split(b" ")[1].decode("utf-8")
-                    ack_packet = f"P2P_HELLO_ACK {username}".encode("utf-8")
-                    udp_sock.sendto(ack_packet, addr)
-                    if peer_name not in p2p_status:
-                        p2p_status[peer_name] = {'active': True, 'last_seen': time.time(), 'addr': addr}
-                    else:
-                        p2p_status[peer_name]['active'] = True
-                        p2p_status[peer_name]['last_seen'] = time.time()
-                        p2p_status[peer_name]['addr'] = addr
-
-                elif data.startswith(b"P2P_HELLO_ACK "):
-                    peer_name = data.split(b" ")[1].decode("utf-8")
-                    if peer_name not in p2p_status:
-                        p2p_status[peer_name] = {'active': True, 'last_seen': time.time(), 'addr': addr}
-                    else:
-                        p2p_status[peer_name]['active'] = True
-                        p2p_status[peer_name]['last_seen'] = time.time()
-                        p2p_status[peer_name]['addr'] = addr
-
-                elif data.startswith(b"P2P_TEXT "):
-                    parts = data.split(b" ", 2)
-                    if len(parts) >= 3:
-                        sender = parts[1].decode("utf-8")
-                        msg = parts[2].decode("utf-8")
-                        out = (
-                            f"\n\n============= [UDP 测试通道: P2P 直连] ============="
-                            f"\n[{time.strftime('%H:%M:%S')}] 目标 {sender} 发来的原始穿透数据:"
-                            f"\n内容 -> {msg}"
-                            f"\n====================================================\n你> "
-                        )
-                        print(out, end="", flush=True)
-
                 elif data.startswith(b"RELAY_DATA "):
                     payload = data[11:]
                     if payload.startswith(b"RELAY_TEXT "):
@@ -359,21 +297,10 @@ def udp_audio_recv_thread(udp_sock, username):
                         if len(parts) >= 3:
                             sender = parts[1].decode("utf-8")
                             msg = parts[2].decode("utf-8")
-                            out = (
-                                f"\n\n============= [UDP 测试通道: RELAY 中继] ============="
-                                f"\n[{time.strftime('%H:%M:%S')}] 经由服务器转发接收自 {sender} 的数据:"
-                                f"\n内容 -> {msg}"
-                                f"\n======================================================\n你> "
-                            )
-                            print(out, end="", flush=True)
+                            _log_to_ui(f"收到文本消息来自 {sender}: {msg}")
                     else:
                         audio_data = payload
                         source_key = ("relay", addr)
-
-                elif data.startswith(b"P2P_AUDIO "):
-                    audio_data = data[10:]
-                    source_key = ("p2p", addr)
-
                 else:
                     audio_data = data
                     source_key = ("raw", addr)
@@ -384,14 +311,10 @@ def udp_audio_recv_thread(udp_sock, username):
                         mix_sources[source_key] = []
                     mix_sources[source_key].append(audio_data)
 
-                    # 间隔 2 秒打印一次谁正在说话，避免控制台被刷屏
                     now = time.time()
                     if source_key not in last_recv_print_time or (now - last_recv_print_time[source_key] > 2.0):
-                        speaker_label = "对方/某人"
-                        if isinstance(source_key, tuple) and len(source_key) == 2:
-                            speaker_label = f"地址 {source_key[1]}"
-                        print(f"\n[监控] 📡 接收到语音来自 {speaker_label} (包大小:{len(audio_data)}B)")
-                        print("你> ", end="", flush=True)
+                        speaker_label = "服务器中继数据"
+                        _log_to_ui(f"[接收] 已接收数据流包大小:{len(audio_data)}B")
                         last_recv_print_time[source_key] = now
 
             # === 定时混音输出 ===
@@ -409,19 +332,19 @@ def udp_audio_recv_thread(udp_sock, username):
                                 stream = p.open(format=FORMAT, channels=CHANNELS,
                                                 rate=VOICE_RATE, output=True,
                                                 frames_per_buffer=CHUNK)
-                                print(f"\n[音频系统] 成功打开播放设备 (Rate:{VOICE_RATE}, Channels:{CHANNELS})")
+                                _log_to_ui(f"[音频系统] 成功打开播放设备")
                             stream.write(mixed)
                             # 间隔打印扬声器播放
                             if now - last_recv_print_time.get("speaker_mix", 0) > 4.0:
-                                print(f"\n[监控] 🔊 扬声器播放中... (混音大小:{len(mixed)}B)")
-                                print("你> ", end="", flush=True)
+                                _log_to_ui(f"[播放] 正在播放混音的音频, 大小:{len(mixed)}B")
+                                
                                 last_recv_print_time["speaker_mix"] = now
                         except Exception as e:
-                            print(f"\n[监控] 🚨扬声器播放抛出异常: {e}")
+                            _log_to_ui(f"播放异常: {e}")
                     mix_sources.clear()
 
     except Exception as e:
-        print(f"\n[音频系统] 接收/播放线程发生崩溃: {e}")
+        _log_to_ui(f"接收/播放异常: {e}")
         pass
     finally:
         if stream:
@@ -436,7 +359,7 @@ def init_udp_session(server_ip, server_port, username="", room_id=""):
     建立UDP会话，向服务器注册NAT地址，启动维护线程，但不启动音频流。
     """
     global udp_session_active, udp_voice_socket, last_server_ip, last_server_port
-    global last_username, last_room_id, p2p_thread_obj, audio_recv_thread_obj
+    global last_username, last_room_id, nat_thread_obj, audio_recv_thread_obj
 
     with audio_state_lock:
         if udp_session_active: return
@@ -459,8 +382,8 @@ def init_udp_session(server_ip, server_port, username="", room_id=""):
             time.sleep(0.1)
 
         if room_id:
-            p2p_thread_obj = threading.Thread(target=p2p_maintenance_thread, args=(udp_voice_socket, username), daemon=True)
-            p2p_thread_obj.start()
+            nat_thread_obj = threading.Thread(target=nat_maintenance_thread, args=(udp_voice_socket, username), daemon=True)
+            nat_thread_obj.start()
 
         # 挂载接收线程用于心跳探测等控制流
         audio_recv_thread_obj = threading.Thread(target=udp_audio_recv_thread, args=(udp_voice_socket, username), daemon=True)
@@ -503,7 +426,7 @@ def close_udp_session():
     """
     完全关闭UDP会话，停止所有相关线程，释放资源。
     """
-    global udp_session_active, udp_voice_socket, p2p_thread_obj, audio_recv_thread_obj
+    global udp_session_active, udp_voice_socket, nat_thread_obj, audio_recv_thread_obj
     with audio_state_lock:
         if not udp_session_active: return
         
@@ -519,9 +442,9 @@ def close_udp_session():
             except: pass
             udp_voice_socket = None
 
-        if p2p_thread_obj:
-            p2p_thread_obj.join(timeout=1.0)
-            p2p_thread_obj = None
+        if nat_thread_obj:
+            nat_thread_obj.join(timeout=1.0)
+            nat_thread_obj = None
 
         if audio_recv_thread_obj:
             audio_recv_thread_obj.join(timeout=1.0)

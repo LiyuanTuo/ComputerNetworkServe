@@ -103,7 +103,7 @@ def receive_messages(sock: socket.socket, stop_event: threading.Event, server_ip
                     parts = line.split(" ")
                     target = parts[1]
                     server_udp_port = int(parts[2].strip())
-                    print(f"\n[系统] '{target}' 已接受呼叫！底层 UDP 语音通道打通中...")
+                    # print(f"\n[系统] '{target}' 已接受呼叫！底UDP 语音通道打通中...")
                     need_prompt = True
                     
                     # 启动底层双向UDP音频收发线程与服务器进行打洞并传输音频
@@ -117,7 +117,7 @@ def receive_messages(sock: socket.socket, stop_event: threading.Event, server_ip
                     room_id = parts[1]
                     server_udp_port = int(parts[2].strip())
                     current_room_id = room_id
-                    print(f"\r[系统] 会议室 {room_id} 内 UDP 中继/直连通道建立中... (默认静音)")
+                    # print(f"\r[系统] 会议室 {room_id} 内 UDP 中继通道建立中... (默认静音)")
                     need_prompt = True
                     init_udp_session(server_ip, server_udp_port, client_username, room_id)
                     set_mute(True)
@@ -129,7 +129,7 @@ def receive_messages(sock: socket.socket, stop_event: threading.Event, server_ip
                     room_id = parts[1]
                     server_udp_port = int(parts[2].strip())
                     current_room_id = room_id
-                    print(f"\r[系统] 成功打通 UDP 信令交互，房间 {room_id} 语音通道建立中... (默认静音)")
+                    # print(f"\r[系统] 成功打通中继信令交互，房间 {room_id} 语音通道建立中... (默认静音)")
                     need_prompt = True
                     init_udp_session(server_ip, server_udp_port, client_username, room_id)
                     set_mute(True)
@@ -151,7 +151,7 @@ def receive_messages(sock: socket.socket, stop_event: threading.Event, server_ip
                                 if old_key not in new_members:
                                     room_members.pop(old_key, None)
                             
-                            print(f"\r[会议室 {room_id}] 当前成员: {', '.join(member_names)}")
+                            # print(f"\r[会议室 {room_id}] 当前成员: {', '.join(member_names)}")
                         except Exception:
                             pass
                     need_prompt = True
