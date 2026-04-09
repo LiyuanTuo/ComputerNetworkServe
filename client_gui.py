@@ -64,6 +64,18 @@ class VoiceChatApp:
 
         self.show_login_page()
 
+        # 挂载底层音频日志
+        try:
+            from audio import set_ui_logger
+            set_ui_logger(self._audio_log_callback)
+        except Exception as e:
+            print("Failed to set audio logger", e)
+
+    def _audio_log_callback(self, msg):
+        self.root.after(0, lambda: self.append_to_history(self.current_chat_target, f"[语音状态] {msg}", "sys"))
+        self.root.after(0, self.update_chat_ui)
+
+
     def clear_container(self):
         for w in self.container.winfo_children():
             w.destroy()
@@ -719,6 +731,18 @@ class VoiceChatApp:
             self.chat_history.clear()
             self.chat_history["广播"] = []
             self.show_login_page()
+
+        # 挂载底层音频日志
+        try:
+            from audio import set_ui_logger
+            set_ui_logger(self._audio_log_callback)
+        except Exception as e:
+            print("Failed to set audio logger", e)
+
+    def _audio_log_callback(self, msg):
+        self.root.after(0, lambda: self.append_to_history(self.current_chat_target, f"[语音状态] {msg}", "sys"))
+        self.root.after(0, self.update_chat_ui)
+
 
     def on_closing(self):
         self.stop_event.set()

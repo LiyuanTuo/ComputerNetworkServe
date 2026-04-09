@@ -410,7 +410,7 @@ def udp_voice_relay(udp_sock: socket.socket, user1: str, user2: str):
     """
     负责在两个客户端之间转发 UDP 语音包的线程
     由于不知道客户端的确切发包端口，采用"记录前两个不同的发送方地址"的策略，
-    将收到的包相互转发实现 P2P 代理
+    将收到的包相互转发实现 UDP 中继
     能否利用user_log文件中存储的IP信息？
     """
     addr1 = None
@@ -687,8 +687,7 @@ def broadcast_room_members(room_id: str):
 
 def room_udp_worker(room_id: str):
     """
-    房间专用的 UDP 端口，用于 每个客户端真实的公网 IP 和端口 (即 NAT 地址) 
-    处理降级中继，
+    房间专用的 UDP 端口，用于 处理 UDP 语音中继转发
     """
     with rooms_lock:
         if room_id not in rooms: return
@@ -795,7 +794,7 @@ def handle_room_join(username: str, room_id: str, client_sock: socket.socket):
     # 先广播成员列表，让新用户获取现有成员的 NAT 地址，也让现有成员知道新用户的加入
     broadcast_room_members(room_id)
 
-    client_sock.sendall(f"[{timestamp()}] [系统] 成功进入会议室 {room_id}，正在进行 P2P 穿透握手...\n".encode(ENCODING))
+    client_sock.sendall(f"[{timestamp()}] [系统] 成功进入会议室 {room_id}，正在进行 语音通道建立...\n".encode(ENCODING))
     client_sock.sendall(f"/ROOM_JOINED {room_id} {relay_port}\n".encode(ENCODING))
 
 
