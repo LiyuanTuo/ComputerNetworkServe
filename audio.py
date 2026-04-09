@@ -179,7 +179,7 @@ def udp_audio_send_thread(udp_sock, server_ip, server_port, username, room_id):
     """
     实时语音发送线程：负责采集本地麦克风的声音并实时发送给服务器。
     """
-    global audio_stream_active, room_members, p2p_status
+    global audio_stream_active, room_members
     p = get_pyaudio()
     
     # 开启麦克风输入流，采样率为专门的 VOICE_RATE (16000)
@@ -264,7 +264,7 @@ def udp_audio_recv_thread(udp_sock, username):
     而非逐包串行写入（后者会导致多人同时说话时声音拉长）。
     同时兼任 UDP 心跳与控制包的接收任务。
     """
-    global udp_session_active, audio_stream_active, p2p_status, udp_voice_pause
+    global udp_session_active, audio_stream_active, udp_voice_pause
     p = get_pyaudio()
     stream = None
 
@@ -436,7 +436,7 @@ def close_udp_session():
         udp_session_active = False
         if udp_voice_socket:
             try:
-                # 唤醒P2P心跳线程
+                # 唤醒阻塞的 recvfrom
                 udp_voice_socket.sendto(b"", ("127.0.0.1", udp_voice_socket.getsockname()[1]))
                 udp_voice_socket.close()
             except: pass
@@ -452,7 +452,6 @@ def close_udp_session():
 
     # 清理全局状态，防止残留影响下次会话
     room_members.clear()
-    p2p_status.clear()
 
 def start_realtime_audio(server_ip, server_port, username="", room_id=""):
     """

@@ -258,7 +258,6 @@ def start_client():
     global current_room_id
     print("提示: 输入文字回车发送\n /voice 语音留言 \n /call @用户 实时语音 \n /contacts 管理通讯录 \n /status 查看联系人状态 \n /help 查看完整帮助 \n /quit 退出")
     print(" /ROOM_CREATE 创建会议 \n /ROOM_JOIN <房间号> 加入会议 \n /ROOM_QUIT <房间号> 退出并挂断语音")
-    print(" /test_p2p <目标用户> <信息> \n /test_relay <目标用户> <信息> \n /p2p_info 查看状态")
     print(" /open_voice 开启语音传输 \n /close_voice 停止语音传输（静音）\n")
     try:
         while not stop_event.is_set():
@@ -308,45 +307,11 @@ def start_client():
                 print("  /close_voice        → 会议中静音")
                 print("\n【其他】")
                 print("  /online             → 查看所有在线用户")
-                print("  /p2p_info           → 查看 P2P 连接状态")
                 print("  /quit               → 退出客户端")
                 print("=" * 50 + "\n")
                 continue
 
-            elif msg.lower() == "/p2p_info":
-                print("\n=== P2P 连接状态 ===")
-                for user, info in p2p_status.items():
-                    active = "打通(Active)" if info.get('active') else "断开或超时"
-                    addr = info.get('addr')
-                    last_seen = info.get('last_seen', 0)
-                    delay = round(time.time() - last_seen, 2) if last_seen else "N/A"
-                    print(f"用户: {user} | 状态: {active} | 地址: {addr} | 空闲时长: {delay}秒")
-                if not p2p_status:
-                    print("暂无对端 P2P 状态信息。")
-                print("==================\n")
-                continue
-                
             # ---- 处理录音指令 ----
-            if msg.lower().startswith("/test_p2p "):
-                parts = msg.split(" ", 2)
-                if len(parts) >= 3:
-                    target = parts[1]
-                    test_msg = parts[2]
-                    test_p2p_or_relay(client_username, target, use_p2p=True, message=test_msg)
-                else:
-                    print("[系统] 用法: /test_p2p <用户名> <消息内容>")
-                continue
-                
-            elif msg.lower().startswith("/test_relay "):
-                parts = msg.split(" ", 2)
-                if len(parts) >= 3:
-                    target = parts[1]
-                    test_msg = parts[2]
-                    test_p2p_or_relay(client_username, target, use_p2p=False, message=test_msg)
-                else:
-                    print("[系统] 用法: /test_relay <用户名> <消息内容>")
-                continue
-
             if "/voice" in msg.lower():
                 record_audio()  # 录制音频成 wav 格式临时文件
                 
