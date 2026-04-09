@@ -211,12 +211,16 @@ def udp_audio_send_thread(udp_sock, server_ip, server_port, username, room_id):
                         last_send_print_time = now
 
                     if True:
-                        # 统一通过服务器 RELAY 中转
-                        for target in list(room_members):
-                            if target != username:
-                                header = f"RELAY {username} {target} ".encode("utf-8")
-                                packet = header + data
-                                udp_sock.sendto(packet, (server_ip, server_port))
+                        if room_id == "":
+                            # 1-on-1: 直接发送音频数据，无需RELAY封装
+                            udp_sock.sendto(data, (server_ip, server_port))
+                        else:
+                            # 统一通过服务器 RELAY 中转
+                            for target in list(room_members):
+                                if target != username:
+                                    header = f"RELAY {username} {target} ".encode("utf-8")
+                                    packet = header + data
+                                    udp_sock.sendto(packet, (server_ip, server_port))
     except Exception as e:
         _log_to_ui(f"\\n[发送线程异常] {e}")
         pass
