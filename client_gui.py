@@ -44,7 +44,7 @@ class VoiceChatApp:
         # 网络相关
         self.client_sock = None
         self.current_user = None
-        self.server_ip = "127.0.0.1" # 默认改为127.0.0.1或者保留原IP
+        self.server_ip = "10.192.4.172" # 默认改为127.0.0.1或者保留原IP
         self.port = 9999
         self.stop_event = threading.Event()
         self.current_pending_port = None
@@ -187,6 +187,31 @@ class VoiceChatApp:
         self.contacts_canvas.pack(side="left", fill="both", expand=True)
         self.contacts_scrollbar.pack(side="right", fill="y")
 
+        # --- 会议室操作区 ---
+        room_sep = tk.Frame(sidebar, bg=COLORS["border"], height=1)
+        room_sep.pack(fill="x")
+        
+        room_bar = tk.Frame(sidebar, bg=COLORS["card"], pady=8, padx=10)
+        room_bar.pack(fill="x")
+        tk.Label(room_bar, text="会议室", bg=COLORS["card"], fg=COLORS["text"],
+                 font=("微软雅黑", 11, "bold")).pack(side="left")
+        
+        room_action = tk.Frame(sidebar, bg=COLORS["card"], padx=10, pady=4)
+        room_action.pack(fill="x")
+        
+        self.entry_room_id = tk.Entry(room_action, font=("Consolas", 9), width=8, bd=1, relief="solid")
+        self.entry_room_id.pack(side="left", padx=(0, 4), ipady=2)
+        self.entry_room_id.insert(0, "房间号")
+        self.entry_room_id.bind("<FocusIn>", lambda e: self.entry_room_id.delete(0, "end") if self.entry_room_id.get() == "房间号" else None)
+        
+        tk.Button(room_action, text="加入", bg=COLORS["online"], fg="white",
+                  font=("微软雅黑", 8), relief="flat", cursor="hand2", padx=4,
+                  command=self._room_join_sidebar).pack(side="left", padx=2)
+                  
+        tk.Button(room_action, text="创建", bg=COLORS["accent"], fg="white",
+                  font=("微软雅黑", 8), relief="flat", cursor="hand2", padx=4,
+                  command=self._room_create_sidebar).pack(side="left", padx=2)
+
         # 底部操作栏
         bot_bar = tk.Frame(sidebar, bg=COLORS["card"], pady=6, padx=10)
         bot_bar.pack(fill="x", side="bottom")
@@ -247,26 +272,37 @@ class VoiceChatApp:
                   command=self.send_message).grid(row=0, column=1)
 
         # 功能按钮行
-        action_frame = tk.Frame(right, bg=COLORS["bg"], padx=12)
-        action_frame.grid(row=3, column=0, sticky="ew")
+        self.action_frame = tk.Frame(right, bg=COLORS["bg"], padx=12)
+        self.action_frame.grid(row=3, column=0, sticky="ew")
         for i in range(5):
-            action_frame.columnconfigure(i, weight=1)
+            self.action_frame.columnconfigure(i, weight=1)
 
-        tk.Button(action_frame, text="🎙 语音留言", font=("微软雅黑", 9), relief="flat",
-                  bg=COLORS["card"], cursor="hand2",
-                  command=self.open_voice_msg_dialog).grid(row=0, column=0, sticky="ew", padx=2)
-        tk.Button(action_frame, text="📞 实时通话", font=("微软雅黑", 9), relief="flat",
-                  bg=COLORS["card"], cursor="hand2",
-                  command=self.initiate_call).grid(row=0, column=1, sticky="ew", padx=2)
-        tk.Button(action_frame, text="🌐 组播会议", font=("微软雅黑", 9), relief="flat",
-                  bg=COLORS["card"], cursor="hand2",
-                  command=self.open_conference_dialog).grid(row=0, column=2, sticky="ew", padx=2)
-        tk.Button(action_frame, text="👥 在线用户", font=("微软雅黑", 9), relief="flat",
-                  bg=COLORS["card"], cursor="hand2",
-                  command=self.request_online_users).grid(row=0, column=3, sticky="ew", padx=2)
-        tk.Button(action_frame, text="❓ 帮助", font=("微软雅黑", 9), relief="flat",
-                  bg=COLORS["card"], cursor="hand2",
-                  command=self.show_help).grid(row=0, column=4, sticky="ew", padx=2)
+        # 常规按钮
+        self.btn_voice_msg = tk.Button(self.action_frame, text="🎙 语音留言", font=("微软雅黑", 9), relief="flat",
+                  bg=COLORS["card"], cursor="hand2", command=self.open_voice_msg_dialog)
+        self.btn_voice_msg.grid(row=0, column=0, sticky="ew", padx=2)
+        
+        self.btn_realtime = tk.Button(self.action_frame, text="📞 实时通话", font=("微软雅黑", 9), relief="flat",
+                  bg=COLORS["card"], cursor="hand2", command=self.initiate_call)
+        self.btn_realtime.grid(row=0, column=1, sticky="ew", padx=2)
+        
+        # 针对会议室的特殊按钮 (默认隐藏)
+        self.btn_open_mic = tk.Button(self.action_frame, text="🎙 开麦", font=("微软雅黑", 9), relief="flat",
+                  bg=COLORS["online"], fg="white", cursor="hand2", command=self._room_open_mic)
+                  
+        self.btn_close_mic = tk.Button(self.action_frame, text="🔇 闭麦", font=("微软雅黑", 9), relief="flat",
+                  bg=COLORS["danger"], fg="white", cursor="hand2", command=self._room_close_mic)
+                  
+        self.btn_quit_room = tk.Button(self.action_frame, text="🚪 退出", font=("微软雅黑", 9), relief="flat",
+                  bg="#5A6A80", fg="white", cursor="hand2", command=self._room_quit_sidebar)
+
+        self.btn_online = tk.Button(self.action_frame, text="👥 在线用户", font=("微软雅黑", 9), relief="flat",
+                  bg=COLORS["card"], cursor="hand2", command=self.request_online_users)
+        self.btn_online.grid(row=0, column=3, sticky="ew", padx=2)
+        
+        self.btn_help = tk.Button(self.action_frame, text="❓ 帮助", font=("微软雅黑", 9), relief="flat",
+                  bg=COLORS["card"], cursor="hand2", command=self.show_help)
+        self.btn_help.grid(row=0, column=4, sticky="ew", padx=2)
 
         # 初次请求通讯录列表
         self.root.after(500, self.request_contacts_list)
@@ -389,7 +425,7 @@ class VoiceChatApp:
         self.root.after(0, _do)
 
     def update_chat_ui(self):
-        """切换频道时刷新聊天框"""
+        """切换频道时刷新聊天框并切换底部按钮"""
         def _do():
             self.chat_text.configure(state="normal")
             self.chat_text.delete(1.0, "end")
@@ -398,6 +434,26 @@ class VoiceChatApp:
                 self.chat_text.insert("end", text + "\n", tag)
             self.chat_text.see("end")
             self.chat_text.configure(state="disabled")
+            
+            # 动态切换底部按钮
+            is_room = self.current_chat_target.startswith("会议室")
+            if is_room:
+                self.btn_voice_msg.grid_remove()
+                self.btn_realtime.grid_remove()
+                self.btn_help.grid_remove()
+                
+                self.btn_open_mic.grid(row=0, column=0, sticky="ew", padx=2)
+                self.btn_close_mic.grid(row=0, column=1, sticky="ew", padx=2)
+                self.btn_quit_room.grid(row=0, column=2, sticky="ew", padx=2)
+            else:
+                self.btn_open_mic.grid_remove()
+                self.btn_close_mic.grid_remove()
+                self.btn_quit_room.grid_remove()
+                
+                self.btn_voice_msg.grid(row=0, column=0, sticky="ew", padx=2)
+                self.btn_realtime.grid(row=0, column=1, sticky="ew", padx=2)
+                self.btn_help.grid(row=0, column=4, sticky="ew", padx=2)
+            
         self.root.after(0, _do)
 
     def send_message(self):
@@ -614,57 +670,30 @@ class VoiceChatApp:
         if hasattr(self, "call_win") and self.call_win.winfo_exists():
             self.call_win.destroy()
 
-    def open_conference_dialog(self):
-        """会议室操作菜单"""
-        win = tk.Toplevel(self.root)
-        win.title("会议室")
-        win.geometry("320x220")
-        win.resizable(False, False)
-        win.configure(bg=COLORS["card"])
+    def _room_create_sidebar(self):
+        self.client_sock.sendall(b'/ROOM_CREATE')
 
-        tk.Label(win, text="会议室管理", font=("微软雅黑", 12, "bold"),
-                 bg=COLORS["card"], fg=COLORS["text"]).pack(pady=(16, 10))
-
-        # 创建会议室
-        tk.Button(win, text="创建新会议室", bg=COLORS["accent"], fg="white",
-                  font=("微软雅黑", 10), relief="flat", cursor="hand2", width=20,
-                  command=lambda: self._room_create(win)).pack(pady=4)
-
-        # 加入会议室
-        join_frame = tk.Frame(win, bg=COLORS["card"])
-        join_frame.pack(pady=4)
-        self.entry_room_id = tk.Entry(join_frame, font=("Consolas", 10), width=12, bd=1, relief="solid")
-        self.entry_room_id.pack(side="left", padx=(0, 6), ipady=2)
-        self.entry_room_id.insert(0, "房间号")
-        self.entry_room_id.bind("<FocusIn>", lambda e: self.entry_room_id.delete(0, "end") if self.entry_room_id.get() == "房间号" else None)
-        tk.Button(join_frame, text="加入", bg=COLORS["online"], fg="white",
-                  font=("微软雅黑", 9), relief="flat", cursor="hand2",
-                  command=lambda: self._room_join(win)).pack(side="left")
-
-        # 退出会议室
-        tk.Button(win, text="退出当前会议室", bg=COLORS["danger"], fg="white",
-                  font=("微软雅黑", 10), relief="flat", cursor="hand2", width=20,
-                  command=lambda: self._room_quit(win)).pack(pady=4)
-
-    def _room_create(self, win):
-        self.client_sock.sendall("/ROOM_CREATE".encode(ENCODING))
-        self.append_to_history("广播", "[系统] 正在创建会议室...", "system")
-        win.destroy()
-
-    def _room_join(self, win):
+    def _room_join_sidebar(self):
         room_id = self.entry_room_id.get().strip()
-        if not room_id or room_id == "房间号":
-            messagebox.showwarning("提示", "请输入房间号", parent=win)
-            return
-        self.client_sock.sendall(f"/ROOM_JOIN {room_id}".encode(ENCODING))
-        self.append_to_history("广播", f"[系统] 正在加入会议室 {room_id}...", "system")
-        win.destroy()
+        self.client_sock.sendall(f'/ROOM_JOIN {room_id}'.encode('utf-8'))
 
-    def _room_quit(self, win):
-        self.client_sock.sendall("/ROOM_QUIT".encode(ENCODING))
-        stop_realtime_audio()
-        self.append_to_history("广播", "[系统] 已退出会议室", "system")
-        win.destroy()
+    def _room_quit_sidebar(self):
+        if hasattr(self, 'current_room_id') and self.current_room_id:
+            self.client_sock.sendall(f'/ROOM_QUIT {self.current_room_id}'.encode('utf-8'))
+            from audio import set_mute
+            set_mute(True)
+
+    def _room_open_mic(self):
+        if hasattr(self, 'current_room_id') and self.current_room_id:
+            from audio import set_mute
+            set_mute(False)
+            self.client_sock.sendall(b'/open_voice')
+
+    def _room_close_mic(self):
+        if hasattr(self, 'current_room_id') and self.current_room_id:
+            from audio import set_mute
+            set_mute(True)
+            self.client_sock.sendall(b'/close_voice')
 
     # ==================== 工具方法 ====================
     def show_help(self):
@@ -701,7 +730,7 @@ class VoiceChatApp:
 • 在线联系人用浅绿背景高亮
 
 【会议室】
-• 点击「🌐 组播会议」可创建/加入/退出会议室
+• 点击「🌐 会议」可创建/加入/退出会议室
 • 会议室内默认静音，创建后可开麦发言
 
 【其他】
