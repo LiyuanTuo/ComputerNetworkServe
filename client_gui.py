@@ -44,7 +44,7 @@ class VoiceChatApp:
         # 网络相关
         self.client_sock = None
         self.current_user = None
-        self.server_ip = "10.198.4.172" # 默认改为127.0.0.1或者保留原IP
+        self.server_ip = "10.192.20.82" # 默认改为127.0.0.1或者保留原IP
         self.port = 9999
         self.stop_event = threading.Event()
         self.current_pending_port = None
