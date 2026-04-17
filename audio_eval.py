@@ -9,7 +9,8 @@
     2) 评测过程中每秒输出一次实时结果（csv）
 
 帧格式（变长）:
-  [MAGIC 4B: 0xAD100200][JSON_LEN 4B big-endian][JSON_UTF8 N字节][PCM M字节]
+  [PRIORITY 1B][MAGIC 4B: 0xAD100200][JSON_LEN 4B big-endian][JSON_UTF8 N字节][PCM M字节]
+  PRIORITY: 包重要性（0=低 / 1=普通 / 2=高），位于 UDP 负载第 0 字节。
   JSON 字段: {"v":版本, "sid":发送者ID, "seq":序号, "ts":发送时间戳, ...可扩展}
   ts 字段保存发送方 Unix 时间戳，接收方据此计算单向时延。
 
@@ -28,13 +29,22 @@ from pathlib import Path
 
 # ===================== UDP 音频报头 =====================
 
-# 帧格式: [MAGIC 4B][JSON_LEN 4B big-endian][JSON_UTF8 NB][PCM MB]
+# 帧格式: [PRIORITY 1B][MAGIC 4B][JSON_LEN 4B big-endian][JSON_UTF8 NB][PCM MB]
 # JSON 最小字段: {"v": 1, "sid": <uint32>, "seq": <uint32>, "ts": <float>}
 # 可在 JSON 中自由追加字段，不影响解析逻辑
-PACKET_MAGIC = b'\xAD\x10\x02\x00'         # 4 字节 magic，区分旧 2 字节格式
-_MAGIC_SIZE = len(PACKET_MAGIC)             # 4
-_LEN_FIELD_SIZE = 4                         # JSON 长度字段：4 字节 big-endian uint32
-_HEADER_PREFIX_SIZE = _MAGIC_SIZE + _LEN_FIELD_SIZE  # 8
+
+# 包重要性常量
+PRIORITY_LOW    = 0   # 低优先级（背景/次要音频）
+PRIORITY_NORMAL = 1   # 普通语音
+PRIORITY_HIGH   = 2   # 高优先级（强语音活动）
+
+PACKET_MAGIC      = b'\xAD\x10\x02\x00'   # 4 字节 magic，区分旧 2 字节格式
+_PRIORITY_SIZE    = 1                      # 重要性字段：UDP 负载第 0 字节
+_MAGIC_SIZE       = len(PACKET_MAGIC)      # 4，起始偏移 = _PRIORITY_SIZE
+_LEN_FIELD_SIZE   = 4                      # JSON 长度字段：4 字节 big-endian uint32
+_MAGIC_OFFSET     = _PRIORITY_SIZE         # 1
+_JSON_LEN_OFFSET  = _MAGIC_OFFSET + _MAGIC_SIZE   # 5
+_HEADER_PREFIX_SIZE = _PRIORITY_SIZE + _MAGIC_SIZE + _LEN_FIELD_SIZE  # 9
 DEFAULT_EVAL_DIR = "eval_net"
 
 
@@ -61,37 +71,41 @@ def make_sender_id(username):
     return zlib.crc32(username.encode()) & 0xFFFFFFFF
 
 
-def pack_audio_header(sender_id: int, seq: int, timestamp: float, **extra) -> bytes:
+def pack_audio_header(sender_id: int, seq: int, timestamp: float,
+                      priority: int = PRIORITY_NORMAL, **extra) -> bytes:
     """
-    将音频包元数据序列化为 JSON 帧头并返回可直接拼接 PCM 的字节串。
-    帧格式：[MAGIC 4B][JSON_LEN 4B big-endian][JSON_UTF8 NB]
-    extra 中的额外字段会合并进 JSON，便于日后扩展新字段。
+    将音频包元数据序列化为带优先级字节的 JSON 帧头，返回可直接拼接 PCM 的字节串。
+    帧格式：[PRIORITY 1B][MAGIC 4B][JSON_LEN 4B big-endian][JSON_UTF8 NB]
+    priority: 包重要性 (0=低, 1=普通, 2=高)；extra 中的额外字段会合并进 JSON。
     """
     meta = {"v": 1, "sid": sender_id, "seq": seq, "ts": round(timestamp, 6)}
     meta.update(extra)
     json_bytes = _json.dumps(meta, separators=(",", ":")).encode("utf-8")
-    prefix = PACKET_MAGIC + struct.pack("!I", len(json_bytes))
+    prio_byte = bytes([max(0, min(255, int(priority)))])
+    prefix = prio_byte + PACKET_MAGIC + struct.pack("!I", len(json_bytes))
     return prefix + json_bytes
 
 
 def unpack_audio_header(data: bytes):
     """
-    解析音频 JSON 帧头。
-    返回 (sender_id, seq, send_ts, pcm_data)。
-    若不含有效帧头（magic 不匹配或数据不完整），返回 (None, None, None, 原始data)。
+    解析音频 JSON 帧头（含首字节优先级字段）。
+    返回 (sender_id, seq, send_ts, priority, pcm_data)。
+    若不含有效帧头（magic 不匹配或数据不完整），返回 (None, None, None, None, 原始data)。
     """
-    if len(data) < _HEADER_PREFIX_SIZE or data[:_MAGIC_SIZE] != PACKET_MAGIC:
-        return None, None, None, data
-    json_len = struct.unpack("!I", data[_MAGIC_SIZE:_HEADER_PREFIX_SIZE])[0]
+    if (len(data) < _HEADER_PREFIX_SIZE or
+            data[_MAGIC_OFFSET:_MAGIC_OFFSET + _MAGIC_SIZE] != PACKET_MAGIC):
+        return None, None, None, None, data
+    priority = data[0]
+    json_len = struct.unpack("!I", data[_JSON_LEN_OFFSET:_JSON_LEN_OFFSET + _LEN_FIELD_SIZE])[0]
     total_header = _HEADER_PREFIX_SIZE + json_len
     if len(data) < total_header:
-        return None, None, None, data
+        return None, None, None, None, data
     try:
         meta = _json.loads(data[_HEADER_PREFIX_SIZE:total_header].decode("utf-8"))
         pcm_data = data[total_header:]
-        return meta.get("sid"), meta.get("seq"), meta.get("ts"), pcm_data
+        return meta.get("sid"), meta.get("seq"), meta.get("ts"), priority, pcm_data
     except Exception:
-        return None, None, None, data
+        return None, None, None, None, data
 
 
 # ===================== 单源指标追踪器 =====================

@@ -10,7 +10,8 @@ import time
 import time
 import math
 import struct
-from audio_eval import pack_audio_header, unpack_audio_header, make_sender_id, evaluator
+from audio_eval import (pack_audio_header, unpack_audio_header, make_sender_id, evaluator,
+                        PRIORITY_NORMAL, PRIORITY_HIGH)
 
 try:
     import audioop
@@ -209,9 +210,11 @@ def udp_audio_send_thread(udp_sock, server_ip, server_port, username, room_id):
                 # print(f"\r[调试] 🎤麦克风已采集 {len(data)}B (RMS:{rms_val:.0f})".ljust(50), end="")
                 
                 if rms_val > SILENCE_THRESHOLD:
-                    # 封装评测报头: [magic 2B][sender_id 4B][seq 4B][timestamp 8B] + PCM
+                    # 封装评测报头: [priority 1B][magic 4B][JSON_LEN 4B][JSON NB] + PCM
                     _audio_seq += 1
-                    audio_hdr = pack_audio_header(_audio_sender_id, _audio_seq, time.time())
+                    # RMS 超过阈值 3 倍以上视为强语音，标记高优先级
+                    prio = PRIORITY_HIGH if rms_val > SILENCE_THRESHOLD * 3 else PRIORITY_NORMAL
+                    audio_hdr = pack_audio_header(_audio_sender_id, _audio_seq, time.time(), priority=prio)
                     payload = audio_hdr + data
 
                     now = time.time()
@@ -322,7 +325,7 @@ def udp_audio_recv_thread(udp_sock, username):
                 # 将音频数据放入混音缓冲区
                 if audio_data and source_key and audio_stream_active and not udp_voice_pause:
                     # 解析评测报头，提取序列号和时间戳用于质量评测
-                    sid, seq, send_ts, pcm_data = unpack_audio_header(audio_data)
+                    sid, seq, send_ts, priority, pcm_data = unpack_audio_header(audio_data)
                     if sid is not None:
                         evaluator.record_packet(sid, seq, send_ts)
                         audio_data = pcm_data
