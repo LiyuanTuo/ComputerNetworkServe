@@ -292,6 +292,7 @@ def broadcast(message: str, sender_socket: socket.socket = None):
         sender_socket:  发送者的 socket，如果指定则跳过该客户端
     """
     data = message.encode(ENCODING)
+    removed_users = []
     with clients_lock:
         for client_sock in list(clients.keys()): # 遍历的对象的类型是socket.socket
             if client_sock == sender_socket:
@@ -300,7 +301,14 @@ def broadcast(message: str, sender_socket: socket.socket = None):
                 client_sock.sendall(data)
             except Exception:
                 # 发送失败说明连接已断开，移除该客户端
-                remove_client(client_sock)
+                removed_users.append(remove_client(client_sock))
+    # 在 clients_lock 外执行后续清理，防止死锁
+    for uname in removed_users:
+        impacted = cleanup_user_resources(uname)
+        for room_id in impacted:
+            broadcast_room_members(room_id)
+        if uname:
+            end_realtime_voice(uname)
 
 
 def privatecast(message: str, target_name: str, sender_socket: socket.socket):
@@ -313,6 +321,7 @@ def privatecast(message: str, target_name: str, sender_socket: socket.socket):
         sender_socket:  发送者的 socket，用于排除自己
     """
     data = message.encode(ENCODING)
+    removed_user = None
     with clients_lock:
         for client_sock, username in clients.items():
             if username == target_name and client_sock != sender_socket:
@@ -320,65 +329,89 @@ def privatecast(message: str, target_name: str, sender_socket: socket.socket):
                     client_sock.sendall(data)
                 except Exception:
                     # 发送失败说明连接已断开，移除该客户端
-                    remove_client(client_sock)
+                    removed_user = remove_client(client_sock)
                 break  # 找到目标用户后就退出循环
+    # 在 clients_lock 外执行后续清理
+    if removed_user:
+        impacted = cleanup_user_resources(removed_user)
+        for room_id in impacted:
+            broadcast_room_members(room_id)
+        if removed_user:
+            end_realtime_voice(removed_user)
 
 
 # 发送失败说明连接已断开，移除客户端连接 / 在客户离开聊天室时调用，
 def remove_client(client_sock: socket.socket):
-    """安全移除一个客户端连接"""
+    """从 clients 字典中移除客户端并关闭其 socket。
+    必须在 clients_lock 内调用。仅做最小清理（不获取其他锁）。
+    返回被移除的 username (可能为 None)。
+    """
     username = clients.pop(client_sock, None)
     try:
         client_sock.close()
     except Exception:
         pass
-        
-    # 如果用户离线，将其从所有的语音房间中剔除
-    if username:
-        impacted_rooms = []
-        with rooms_lock:
-            empty_rooms = []
-            for room_id, room in list(rooms.items()):
-                if username in room["members"]:
-                    del room["members"][username]
-                    impacted_rooms.append(room_id)
-                if not room["members"]:
-                    empty_rooms.append(room_id)
-            for room_id in empty_rooms:
-                try: rooms[room_id]["relay_sock"].close()
-                except: pass
-                del rooms[room_id]
-                if room_id in impacted_rooms:
-                    impacted_rooms.remove(room_id)
-            
-            if impacted_rooms or empty_rooms:
-                save_rooms()
-                    
-        for room_id in impacted_rooms:
-            broadcast_room_members(room_id)
-        
-        # 如果用户掉线，清理那些还没接通的呼叫状态
-        with pending_calls_lock:
-            # 他是呼叫者
-            if username in pending_calls:
-                info = pending_calls.pop(username)
+    return username
+
+
+def cleanup_user_resources(username):
+    """在 clients_lock 释放后调用，清理用户的房间、呼叫等资源。
+    返回 impacted_rooms 列表（需要后续调用 broadcast_room_members）。
+    """
+    if not username:
+        return []
+
+    impacted_rooms = []
+    # 将其从所有的语音房间中剔除
+    with rooms_lock:
+        empty_rooms = []
+        for room_id, room in list(rooms.items()):
+            if username in room["members"]:
+                del room["members"][username]
+                impacted_rooms.append(room_id)
+            if not room["members"]:
+                empty_rooms.append(room_id)
+        for room_id in empty_rooms:
+            try: rooms[room_id]["relay_sock"].close()
+            except: pass
+            del rooms[room_id]
+            if room_id in impacted_rooms:
+                impacted_rooms.remove(room_id)
+
+        if impacted_rooms or empty_rooms:
+            save_rooms()
+
+    # 清理那些还没接通的呼叫状态
+    with pending_calls_lock:
+        # 他是呼叫者
+        if username in pending_calls:
+            info = pending_calls.pop(username)
+            try: info["sock"].close()
+            except: pass
+
+        # 他是被叫者
+        to_remove_caller = None
+        for c_name, info in pending_calls.items():
+            if info["target"] == username:
+                to_remove_caller = c_name
                 try: info["sock"].close()
                 except: pass
-            
-            # 他是被叫者
-            to_remove_caller = None
-            for c_name, info in pending_calls.items():
-                if info["target"] == username:
-                    to_remove_caller = c_name
-                    try: info["sock"].close()
-                    except: pass
-                    break
-            if to_remove_caller:
-                del pending_calls[to_remove_caller]
-        
-        # 并帮他清理还在进行的实时语音
-        end_realtime_voice(username)
+                break
+        if to_remove_caller:
+            del pending_calls[to_remove_caller]
 
+    return impacted_rooms
+
+
+def full_remove_and_cleanup(client_sock):
+    """完整的移除+清理流程（获取 clients_lock 并在释放后做后续清理）"""
+    with clients_lock:
+        username = remove_client(client_sock)
+    impacted_rooms = cleanup_user_resources(username)
+    for room_id in impacted_rooms:
+        broadcast_room_members(room_id)
+    if username:
+        end_realtime_voice(username)
     return username
 
 
@@ -708,8 +741,9 @@ def room_udp_worker(room_id: str):
                     username = parts[1]
                     addr_changed = False
                     with rooms_lock:
-                        if room_id in rooms:
-                            old_addr = rooms[room_id]["members"].get(username)
+                        # 仅当用户仍是房间成员时才更新其 NAT 地址，防止已退出的用户被重新注册
+                        if room_id in rooms and username in rooms[room_id]["members"]:
+                            old_addr = rooms[room_id]["members"][username]
                             if old_addr != addr:
                                 rooms[room_id]["members"][username] = addr
                                 addr_changed = True
@@ -758,6 +792,19 @@ def handle_room_create(username: str, client_sock: socket.socket):
     """创建新会议室并返回房间号及 UDP 端口"""
     # room_id = str(uuid.uuid4())[:6].upper()
     room_id = "888888"  # 调试期固定房间号
+
+    # 检查该房间是否已存在，防止覆盖旧的 relay_sock 导致资源泄漏
+    with rooms_lock:
+        if room_id in rooms:
+            # 房间已存在，让用户直接加入
+            rooms[room_id]["members"][username] = None
+            relay_port = rooms[room_id]["port"]
+            save_rooms()
+            broadcast_room_members(room_id)
+            client_sock.sendall(f"[{timestamp()}] [系统] 会议室 {room_id} 已存在，已直接加入\n".encode(ENCODING))
+            client_sock.sendall(f"/ROOM_CREATED {room_id} {relay_port}\n".encode(ENCODING))
+            return
+
     relay_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     
     # 尝试绑定固定的UDP中继端口，例如 8888
@@ -805,6 +852,7 @@ def handle_room_join(username: str, room_id: str, client_sock: socket.socket):
 
 def handle_room_quit(username: str, room_id: str, client_sock: socket.socket):
     """退出指定会议室"""
+    room_empty = False
     with rooms_lock:
         if room_id in rooms:
             if username in rooms[room_id]["members"]:
@@ -815,11 +863,11 @@ def handle_room_quit(username: str, room_id: str, client_sock: socket.socket):
                 try: rooms[room_id]["relay_sock"].close()
                 except: pass
                 del rooms[room_id]
-                save_rooms()
-                return
+                room_empty = True
                 
     save_rooms()
-    broadcast_room_members(room_id)
+    if not room_empty:
+        broadcast_room_members(room_id)
     client_sock.sendall(f"[{timestamp()}] [系统] 您已离开会议室 {room_id}\n".encode(ENCODING))
 
 
@@ -989,13 +1037,20 @@ def handle_client(client_sock: socket.socket, addr: tuple):
                         user_contacts = contacts.get(username, [])
                     formatted = f"[{timestamp()}] {username}: {text}\n"
                     data_bytes = formatted.encode(ENCODING)
+                    removed_in_broadcast = []
                     with clients_lock:
                         for sock, name in list(clients.items()):
                             if name in user_contacts and sock != client_sock:
                                 try:
                                     sock.sendall(data_bytes)
                                 except Exception:
-                                    remove_client(sock)
+                                    removed_in_broadcast.append(remove_client(sock))
+                    for uname_r in removed_in_broadcast:
+                        impacted_r = cleanup_user_resources(uname_r)
+                        for rid in impacted_r:
+                            broadcast_room_members(rid)
+                        if uname_r:
+                            end_realtime_voice(uname_r)
 
     except ConnectionResetError:
         pass
@@ -1005,7 +1060,12 @@ def handle_client(client_sock: socket.socket, addr: tuple):
         # ---- 第三步：清理 ----
         with clients_lock:
             username = remove_client(client_sock)
+        # 在 clients_lock 释放后执行需要获取其他锁的操作，防止 ABBA 死锁
+        impacted_rooms = cleanup_user_resources(username)
+        for room_id in impacted_rooms:
+            broadcast_room_members(room_id)
         if username:
+            end_realtime_voice(username)
             leave_msg = f"[{timestamp()}] >>> '{username}' 离开了聊天室 <<<"
             broadcast(leave_msg)
             # 通知该用户的联系人：他下线了

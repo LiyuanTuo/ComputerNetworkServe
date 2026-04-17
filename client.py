@@ -23,6 +23,7 @@ import base64
 import os
 import json
 from audio import * 
+from audio_eval import start_evaluation, stop_evaluation, get_evaluation_output_paths
 # ============ 配置 ============
 # 对于音频传输，普通的 4096 缓冲区不够大，改为 1MB
 BUFFER_SIZE = 1024 * 1024 
@@ -35,6 +36,18 @@ current_pending_port = None
 contact_status: dict[str, str] = {}  # {联系人用户名: "online"/"offline"}
 client_username = ""
 current_room_id = ""
+
+
+def _print_eval_tick(row):
+    """每秒输出一次评测结果（由 audio_eval 后台线程回调）。"""
+    print(
+        f"[评测 {row['timestamp']}] "
+        f"丢包率={row['loss_rate'] * 100:.2f}% "
+        f"时延={row['avg_delay_ms']:.2f}ms "
+        f"抖动={row['avg_jitter_ms']:.2f}ms "
+        f"乱序={row['reorder_rate'] * 100:.2f}% "
+        f"总分={row['score']}/100"
+    )
 
 def receive_messages(sock: socket.socket, stop_event: threading.Event, server_ip: str):
     """
@@ -376,21 +389,18 @@ def start_client():
                 continue
                 
             elif msg.lower().startswith("/room_quit"):
-                close_udp_session()  # 本地挂断 UDP 语音流
                 parts = msg.split()
                 if len(parts) >= 2:
                     quit_room_id = parts[1]
                 else:
                     quit_room_id = current_room_id  # 未指定时使用当前房间
                 current_room_id = "" # 清空当前所在房间 ID
+                # 先通知服务器再关闭本地资源
                 if quit_room_id:
                     client_sock.sendall(f"/ROOM_QUIT {quit_room_id}".encode(ENCODING))
                 else:
                     client_sock.sendall("/ROOM_QUIT".encode(ENCODING))
-                
-                # 退出房间后应该停止这边的语音收发
-                stop_audio_stream()
-                close_udp_session()
+                close_udp_session()  # 关闭本地 UDP 语音（内部包含 stop_audio_stream）
                 continue
 
             elif msg.lower().startswith("/open_voice"):
@@ -407,6 +417,26 @@ def start_client():
                     continue
                 set_mute(True)  # 仅需开启静音，保留接收线程和扬声器工作
                 client_sock.sendall(msg.encode(ENCODING))
+                continue
+
+            elif msg.lower() == "/eval_start":
+                report_path, csv_path = start_evaluation(
+                    interval_sec=1.0,
+                    tick_callback=_print_eval_tick,
+                )
+                print(f"[系统] 网络音频质量测评已开始：每秒反馈一次，实时数据写入 {csv_path}")
+                print(f"[系统] 汇总报告将保存到 {report_path}")
+                continue
+
+            elif msg.lower() == "/eval_stop":
+                report = stop_evaluation()
+                if report:
+                    report_path, csv_path = get_evaluation_output_paths()
+                    print(f"[系统] 测评已结束：汇总报告已保存至 {report_path}")
+                    print(f"[系统] 实时明细已保存至 {csv_path}")
+                    print(report)
+                else:
+                    print("[系统] 测评未在进行中")
                 continue
 
             elif msg.lower() == "/realtime -quit":

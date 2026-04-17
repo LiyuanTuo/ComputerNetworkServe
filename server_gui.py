@@ -518,11 +518,12 @@ class ServerGUI:
                 target_sock.sendall(f"[{server.timestamp()}] [系统] 您已被管理员踢出服务器\n".encode(server.ENCODING))
             except Exception:
                 pass
-            server.remove_client(target_sock)
-            try:
-                target_sock.close()
-            except Exception:
-                pass
+            with server.clients_lock:
+                server.remove_client(target_sock)
+            impacted = server.cleanup_user_resources(username)
+            for room_id in impacted:
+                server.broadcast_room_members(room_id)
+            server.end_realtime_voice(username)
             self._log(f"[管理] 已踢出用户 '{username}'", "warn")
 
     # ==================== 日志 ====================

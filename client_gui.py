@@ -9,6 +9,7 @@ from datetime import datetime
 import re
 
 from audio import record_audio, play_audio, start_realtime_audio, stop_realtime_audio, TEMP_WAV_FILE, set_mute, set_pause
+from audio_eval import start_evaluation, stop_evaluation, get_evaluation_output_paths
 
 BUFFER_SIZE = 1024 * 1024
 ENCODING = "utf-8"
@@ -307,6 +308,15 @@ class VoiceChatApp:
         self.btn_help = tk.Button(self.action_frame, text="❓ 帮助", font=("微软雅黑", 9), relief="flat",
                   bg=COLORS["card"], cursor="hand2", command=self.show_help)
         self.btn_help.grid(row=0, column=4, sticky="ew", padx=2)
+
+        # 音频质量测评按钮行
+        self.btn_eval_start = tk.Button(self.action_frame, text="📊 开始测评", font=("微软雅黑", 9), relief="flat",
+                  bg="#6C5CE7", fg="white", cursor="hand2", command=self._start_eval)
+        self.btn_eval_start.grid(row=1, column=0, sticky="ew", padx=2, pady=(2, 0))
+
+        self.btn_eval_stop = tk.Button(self.action_frame, text="📊 结束测评", font=("微软雅黑", 9), relief="flat",
+                  bg="#A29BFE", fg="white", cursor="hand2", command=self._stop_eval)
+        self.btn_eval_stop.grid(row=1, column=1, sticky="ew", padx=2, pady=(2, 0))
 
         # 初次请求通讯录列表
         self.root.after(500, self.request_contacts_list)
@@ -775,6 +785,43 @@ class VoiceChatApp:
             set_mute(True)
             self.client_sock.sendall(b'/close_voice')
 
+    # ==================== 音频质量测评 ====================
+    def _on_eval_tick(self, row):
+        text = (
+            f"[测评 {row['timestamp']}] "
+            f"丢包率={row['loss_rate'] * 100:.2f}% "
+            f"时延={row['avg_delay_ms']:.2f}ms "
+            f"抖动={row['avg_jitter_ms']:.2f}ms "
+            f"乱序={row['reorder_rate'] * 100:.2f}% "
+            f"总分={row['score']}/100"
+        )
+
+        # 回调来自后台线程，UI 更新需切回主线程
+        self.root.after(0, lambda: self.append_to_history(self.current_chat_target, text, "system"))
+
+    def _start_eval(self):
+        report_path, csv_path = start_evaluation(
+            interval_sec=1.0,
+            tick_callback=self._on_eval_tick,
+        )
+        self.append_to_history(
+            self.current_chat_target,
+            f"[系统] 网络音频质量测评已开始：每秒反馈一次，实时数据写入 {csv_path}；汇总报告将保存到 {report_path}",
+            "system"
+        )
+
+    def _stop_eval(self):
+        report = stop_evaluation()
+        if report:
+            report_path, csv_path = get_evaluation_output_paths()
+            self.append_to_history(
+                self.current_chat_target,
+                f"[系统] 测评已结束：汇总报告已保存至 {report_path}；实时明细在 {csv_path}\n{report}",
+                "system"
+            )
+        else:
+            self.append_to_history(self.current_chat_target, "[系统] 测评未在进行中", "system")
+
     # ==================== 工具方法 ====================
     def show_help(self):
         """显示帮助窗口"""
@@ -829,6 +876,7 @@ class VoiceChatApp:
 
     def disconnect(self):
         if messagebox.askyesno("确认", "确定断开与服务器的连接？"):
+            stop_realtime_audio()
             try:
                 self.client_sock.sendall("/quit".encode(ENCODING))
             except Exception:
@@ -841,12 +889,12 @@ class VoiceChatApp:
             self.chat_history["广播"] = []
             self.show_login_page()
 
-        # 挂载底层音频日志
-        try:
-            from audio import set_ui_logger
-            set_ui_logger(self._audio_log_callback)
-        except Exception as e:
-            print("Failed to set audio logger", e)
+            # 挂载底层音频日志
+            try:
+                from audio import set_ui_logger
+                set_ui_logger(self._audio_log_callback)
+            except Exception as e:
+                print("Failed to set audio logger", e)
 
     def _audio_log_callback(self, msg):
         self.root.after(0, lambda: self.append_to_history(self.current_chat_target, f"[语音状态] {msg}", "sys"))
@@ -855,6 +903,7 @@ class VoiceChatApp:
 
     def on_closing(self):
         self.stop_event.set()
+        stop_realtime_audio()
         try:
             if self.client_sock:
                 self.client_sock.sendall("/quit".encode(ENCODING))
