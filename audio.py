@@ -376,6 +376,19 @@ def init_udp_session(server_ip, server_port, username="", room_id=""):
         udp_session_active = True
         udp_voice_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         
+        # 将client语音接收和发送的端口进行固定
+        if room_id:
+            try:
+                # 尝试绑定固定端口 7777（单机测试如果有多个客户端可能会冲突，此时会自动采用随机端口）
+                udp_voice_socket.bind(("0.0.0.0", 7777))
+                _log_to_ui(f"[系统] 已固定本地UDP语音端口为 {udp_voice_socket.getsockname()[1]}")
+            except OSError:
+                udp_voice_socket.bind(("0.0.0.0", 0))
+                _log_to_ui(f"[系统] 端口7777被占用，使用随机本地UDP语音端口 {udp_voice_socket.getsockname()[1]}")
+        else:
+            # 非会议室(单聊)时绑定随机端口
+            udp_voice_socket.bind(("0.0.0.0", 0))
+
         if username:
             # 多次发送 STUN_HELLO 确保 NAT 地址注册成功（UDP 不可靠）
             for _ in range(3):

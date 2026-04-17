@@ -720,8 +720,6 @@ def room_udp_worker(room_id: str):
                         broadcast_room_members(room_id)
                 continue
                 
-            # 中断/降级中继包 (带有 sender_name 和 target_name 的二进制音频)
-            # 格式约定: b"RELAY sender_name target_name " + payload
             if data.startswith(b"RELAY "):
                 import time
                 now = time.time()
@@ -761,7 +759,14 @@ def handle_room_create(username: str, client_sock: socket.socket):
     # room_id = str(uuid.uuid4())[:6].upper()
     room_id = "888888"  # 调试期固定房间号
     relay_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    relay_sock.bind((HOST, 0))
+    
+    # 尝试绑定固定的UDP中继端口，例如 8888
+    try:
+        relay_sock.bind((HOST, 8888))
+    except OSError:
+        print(f"[{timestamp()}] [房间调试] 端口 8888 已被占用，采用系统自动分配")
+        relay_sock.bind((HOST, 0))
+        
     relay_port = relay_sock.getsockname()[1]
 
     with rooms_lock:
