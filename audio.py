@@ -10,6 +10,7 @@ import time
 import time
 import math
 import struct
+from audio_eval import pack_audio_header, unpack_audio_header, make_sender_id, evaluator
 
 try:
     import audioop
@@ -126,6 +127,10 @@ room_members = {}        # {用户名: (ip, port)}
 last_server_ip = ""
 last_server_port = 0
 
+# 音频评测报头用的序列号和发送者标识
+_audio_seq = 0
+_audio_sender_id = 0
+
 def set_mute(state):
     global udp_voice_mute, pending_mute, audio_stream_active
     with audio_state_lock:
@@ -179,7 +184,7 @@ def udp_audio_send_thread(udp_sock, server_ip, server_port, username, room_id):
     """
     实时语音发送线程：负责采集本地麦克风的声音并实时发送给服务器。
     """
-    global audio_stream_active, room_members
+    global audio_stream_active, room_members, _audio_seq
     p = get_pyaudio()
     
     # 开启麦克风输入流，采样率为专门的 VOICE_RATE (16000)
@@ -204,22 +209,27 @@ def udp_audio_send_thread(udp_sock, server_ip, server_port, username, room_id):
                 # print(f"\r[调试] 🎤麦克风已采集 {len(data)}B (RMS:{rms_val:.0f})".ljust(50), end="")
                 
                 if rms_val > SILENCE_THRESHOLD:
+                    # 封装评测报头: [magic 2B][sender_id 4B][seq 4B][timestamp 8B] + PCM
+                    _audio_seq += 1
+                    audio_hdr = pack_audio_header(_audio_sender_id, _audio_seq, time.time())
+                    payload = audio_hdr + data
+
                     now = time.time()
                     if now - last_send_print_time > 2.0:
-                        _log_to_ui(f"[发送] 音量: {rms_val:.0f} 包大小: {len(data)}B")
+                        _log_to_ui(f"[发送] 音量: {rms_val:.0f} 包大小: {len(payload)}B")
                         
                         last_send_print_time = now
 
                     if True:
                         if room_id == "":
                             # 1-on-1: 直接发送音频数据，无需RELAY封装
-                            udp_sock.sendto(data, (server_ip, server_port))
+                            udp_sock.sendto(payload, (server_ip, server_port))
                         else:
                             # 统一通过服务器 RELAY 中转
                             for target in list(room_members):
                                 if target != username:
                                     header = f"RELAY {username} {target} ".encode("utf-8")
-                                    packet = header + data
+                                    packet = header + payload
                                     udp_sock.sendto(packet, (server_ip, server_port))
     except Exception as e:
         _log_to_ui(f"\\n[发送线程异常] {e}")
@@ -311,6 +321,12 @@ def udp_audio_recv_thread(udp_sock, username):
 
                 # 将音频数据放入混音缓冲区
                 if audio_data and source_key and audio_stream_active and not udp_voice_pause:
+                    # 解析评测报头，提取序列号和时间戳用于质量评测
+                    sid, seq, send_ts, pcm_data = unpack_audio_header(audio_data)
+                    if sid is not None:
+                        evaluator.record_packet(sid, seq, send_ts)
+                        audio_data = pcm_data
+
                     if source_key not in mix_sources:
                         mix_sources[source_key] = []
                     mix_sources[source_key].append(audio_data)
@@ -364,9 +380,14 @@ def init_udp_session(server_ip, server_port, username="", room_id=""):
     """
     global udp_session_active, udp_voice_socket, last_server_ip, last_server_port
     global last_username, last_room_id, nat_thread_obj, audio_recv_thread_obj
+    global _audio_seq, _audio_sender_id
 
     with audio_state_lock:
         if udp_session_active: return
+        
+        # 初始化评测报头用的序列号和发送者标识
+        _audio_seq = 0
+        _audio_sender_id = make_sender_id(username) if username else 0
         
         last_server_ip = server_ip
         last_server_port = server_port
