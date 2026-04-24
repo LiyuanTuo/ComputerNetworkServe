@@ -10,6 +10,7 @@ import re
 
 from audio import record_audio, play_audio, start_realtime_audio, stop_realtime_audio, TEMP_WAV_FILE, set_mute, set_pause, get_audio_backend_notice
 from audio_eval import start_evaluation, stop_evaluation, get_evaluation_output_paths
+from common.ports import DEFAULT_SERVER_IP, SERVER_TCP_PORT
 
 BUFFER_SIZE = 1024 * 1024
 ENCODING = "utf-8"
@@ -45,8 +46,8 @@ class VoiceChatApp:
         # 网络相关
         self.client_sock = None
         self.current_user = None
-        self.server_ip = "10.192.20.82" # 默认改为127.0.0.1或者保留原IP
-        self.port = 9999
+        self.server_ip = DEFAULT_SERVER_IP
+        self.port = SERVER_TCP_PORT
         self.stop_event = threading.Event()
         self.current_pending_port = None
 
