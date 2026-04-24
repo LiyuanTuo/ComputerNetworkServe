@@ -19,10 +19,11 @@ import json
 import sys
 from datetime import datetime
 import uuid
+from common.ports import ROOM_RELAY_UDP_PORT, SERVER_CALL_RELAY_UDP_PORTS, SERVER_TCP_PORT
 
 # ============ 配置 ============
 HOST = "0.0.0.0"  # 监听所有网卡，局域网内其他主机可连接
-PORT = 9999       # 服务端口号，客户端需要连接此端口
+PORT = SERVER_TCP_PORT       # 服务端口号，客户端需要连接此端口
 BUFFER_SIZE = 1024 * 1024 # 扩大到 1MB，否则装不下 Base64 的音频长字符串
 ENCODING = "utf-8"
 
@@ -38,6 +39,22 @@ pending_calls_lock = threading.Lock()
 ROOMS_FILE = "rooms.json"
 rooms: dict = {}                         # {room_id: {"members": {username: (ip, port)}, "relay_sock": socket, "port": int}}
 rooms_lock = threading.RLock()
+
+
+def bind_udp_socket_from_pool(preferred_ports):
+    """按固定端口池顺序绑定 UDP socket。"""
+    last_error = None
+    for port in preferred_ports:
+        udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            udp_sock.bind((HOST, port))
+            return udp_sock, port
+        except OSError as e:
+            udp_sock.close()
+            last_error = e
+    if last_error is not None:
+        raise last_error
+    raise OSError("未提供可绑定的 UDP 端口")
 
 
 def save_rooms():
@@ -602,9 +619,11 @@ def handle_call_request(caller_name: str, target_name: str, caller_sock: socket.
         return
 
     # 创建一条专用的 UDP 隧道中继
-    relay_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    relay_sock.bind((HOST, 0)) # 0表示服务器随机分配一个端口供udp链接
-    relay_port = relay_sock.getsockname()[1]
+    try:
+        relay_sock, relay_port = bind_udp_socket_from_pool(SERVER_CALL_RELAY_UDP_PORTS)
+    except OSError as e:
+        caller_sock.sendall(f"[{timestamp()}] [系统] 语音中继端口不足，无法建立呼叫: {e}\n".encode(ENCODING))
+        return
 
     # 将其登入到“等待接听(pending)”列表中
     with pending_calls_lock:
@@ -806,15 +825,15 @@ def handle_room_create(username: str, client_sock: socket.socket):
             return
 
     relay_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    
-    # 尝试绑定固定的UDP中继端口，例如 8888
     try:
-        relay_sock.bind((HOST, 8888))
-    except OSError:
-        print(f"[{timestamp()}] [房间调试] 端口 8888 已被占用，采用系统自动分配")
-        relay_sock.bind((HOST, 0))
-        
-    relay_port = relay_sock.getsockname()[1]
+        relay_sock.bind((HOST, ROOM_RELAY_UDP_PORT))
+    except OSError as e:
+        relay_sock.close()
+        client_sock.sendall(f"[{timestamp()}] [系统] 会议室语音端口 {ROOM_RELAY_UDP_PORT} 不可用，请先释放该端口后再创建会议室\n".encode(ENCODING))
+        print(f"[{timestamp()}] [房间调试] 固定会议室语音端口 {ROOM_RELAY_UDP_PORT} 绑定失败: {e}")
+        return
+
+    relay_port = ROOM_RELAY_UDP_PORT
 
     with rooms_lock:
         rooms[room_id] = {

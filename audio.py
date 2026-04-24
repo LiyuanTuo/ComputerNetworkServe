@@ -12,6 +12,7 @@ import struct
 import zlib
 from audio_eval import (pack_audio_header, unpack_audio_header, make_sender_id, evaluator,
                         PRIORITY_NORMAL, PRIORITY_HIGH)
+from common.ports import CLIENT_CALL_LOCAL_UDP_PORTS, CLIENT_ROOM_LOCAL_UDP_PORTS
 
 try:
     import pyaudio
@@ -214,6 +215,22 @@ def get_pyaudio():
         if _pyaudio_instance is None:
             _pyaudio_instance = pyaudio.PyAudio()
         return _pyaudio_instance
+
+
+def _bind_preferred_local_udp_port(udp_sock, preferred_ports, purpose_label):
+    for port in preferred_ports:
+        try:
+            udp_sock.bind(("0.0.0.0", port))
+            _log_to_ui(f"[系统] {purpose_label}本地UDP端口已固定为 {udp_sock.getsockname()[1]}")
+            return
+        except OSError:
+            continue
+
+    udp_sock.bind(("0.0.0.0", 0))
+    _log_to_ui(
+        f"[系统] {purpose_label}固定端口池 {list(preferred_ports)} 已被占用，"
+        f"改用本地UDP端口 {udp_sock.getsockname()[1]}"
+    )
 
 
 def _get_profile_config(profile_name):
@@ -705,18 +722,11 @@ def init_udp_session(server_ip, server_port, username="", room_id=""):
         udp_session_active = True
         udp_voice_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         
-        # 将client语音接收和发送的端口进行固定
+        # 将 client 语音接收和发送端口固定到与服务器不冲突的本地端口池
         if room_id:
-            try:
-                # 尝试绑定固定端口 7777（单机测试如果有多个客户端可能会冲突，此时会自动采用随机端口）
-                udp_voice_socket.bind(("0.0.0.0", 7777))
-                _log_to_ui(f"[系统] 已固定本地UDP语音端口为 {udp_voice_socket.getsockname()[1]}")
-            except OSError:
-                udp_voice_socket.bind(("0.0.0.0", 0))
-                _log_to_ui(f"[系统] 端口7777被占用，使用随机本地UDP语音端口 {udp_voice_socket.getsockname()[1]}")
+            _bind_preferred_local_udp_port(udp_voice_socket, CLIENT_ROOM_LOCAL_UDP_PORTS, "会议语音")
         else:
-            # 非会议室(单聊)时绑定随机端口
-            udp_voice_socket.bind(("0.0.0.0", 0))
+            _bind_preferred_local_udp_port(udp_voice_socket, CLIENT_CALL_LOCAL_UDP_PORTS, "单聊语音")
 
         if username:
             # 多次发送 STUN_HELLO 确保 NAT 地址注册成功（UDP 不可靠）

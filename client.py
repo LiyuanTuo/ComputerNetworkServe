@@ -21,6 +21,7 @@ import base64
 import json
 from audio import * 
 from audio_eval import start_evaluation, stop_evaluation, get_evaluation_output_paths
+from common.ports import DEFAULT_SERVER_IP, SERVER_TCP_PORT
 # ============ 配置 ============
 # 对于音频传输，普通的 4096 缓冲区不够大，改为 1MB
 BUFFER_SIZE = 1024 * 1024 
@@ -225,8 +226,8 @@ def start_client():
     # ---- 获取连接信息 ----
     # server_ip = "DESKTOP-4AFQ0JR" # 使用我的计算机名来作为服务器 就不用担心局域网内 IP 地址变化了 你们要改成你们自己的hostname 或者直接输入局域网 IP 地址
     # server_ip = "10.198.51.210" #蒋利伟主机名"desktop_m2mi6se8"
-    server_ip = "10.192.20.82" #蒋利伟主机名"desktop_m2mi6se8"
-    port = 9999
+    server_ip = DEFAULT_SERVER_IP
+    port = SERVER_TCP_PORT
 
     # 尝试将主机名解析为 IP 地址（支持 hostname 和 IP 两种输入）
     try:
