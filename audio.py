@@ -69,6 +69,7 @@ ADAPTIVE_PROFILE_ORDER = {"poor": 0, "fair": 1, "good": 2}
 ADAPTIVE_FEEDBACK_INTERVAL = 2.0
 ADAPTIVE_FEEDBACK_TTL = 6.0
 ADAPTIVE_MIN_PACKETS = 4
+ROOM_RELAY_PROBE_LOG_INTERVAL = 6.0
 ADAPTIVE_PROFILES = {
     "good": {"sample_rate": 16000, "codec": AUDIO_CODEC_PCM, "label": "良好档"},
     "fair": {"sample_rate": 12000, "codec": AUDIO_CODEC_ULAW, "label": "均衡档"},
@@ -179,6 +180,7 @@ _control_seq = 0
 _adaptive_send_profile = "good"
 _peer_feedback_profiles = {}  # {peer_sender_id: {"profile": str, "time": float}}
 _feedback_sent_cache = {}     # {remote_sender_id: {"profile": str, "time": float}}
+_probe_recv_log_times = {}
 
 def set_mute(state):
     global udp_voice_mute, pending_mute, audio_stream_active
@@ -429,6 +431,38 @@ def _build_adaptive_feedback_packet(profile_name, snapshot):
     )
 
 
+def _build_control_packet(control_name, priority=PRIORITY_NORMAL, **extra):
+    global _control_seq
+    _control_seq += 1
+    return pack_audio_header(
+        _audio_sender_id,
+        _control_seq,
+        time.time(),
+        priority=priority,
+        kind="control",
+        control=control_name,
+        **extra,
+    )
+
+
+def _send_room_probe_packets(udp_sock, username):
+    if not username or not last_room_id or not last_server_ip or not last_server_port:
+        return
+
+    targets = [target for target in list(room_members.keys()) if target != username]
+    if not targets:
+        return
+
+    packet = _build_control_packet("probe", priority=PRIORITY_NORMAL, room=last_room_id)
+    server_addr = (last_server_ip, last_server_port)
+    for target in targets:
+        try:
+            relay_header = f"RELAY {username} {target} ".encode("utf-8")
+            udp_sock.sendto(relay_header + packet, server_addr)
+        except Exception:
+            pass
+
+
 def _maybe_send_adaptive_feedback(udp_sock, remote_sender_id):
     if remote_sender_id in (None, 0, _audio_sender_id):
         return
@@ -466,8 +500,22 @@ def _maybe_send_adaptive_feedback(udp_sock, remote_sender_id):
 
 
 def _handle_control_packet(meta):
-    if meta.get("kind") != "control" or meta.get("control") != "adapt":
+    if meta.get("kind") != "control":
         return False
+    control_name = meta.get("control")
+    if control_name == "probe":
+        peer_sender_id = meta.get("sid")
+        if peer_sender_id in (None, _audio_sender_id):
+            return True
+        now = time.time()
+        last_log_time = _probe_recv_log_times.get(peer_sender_id, 0.0)
+        if now - last_log_time >= ROOM_RELAY_PROBE_LOG_INTERVAL:
+            sender_name = _resolve_username_by_sender_id(peer_sender_id) or str(peer_sender_id)
+            _log_to_ui(f"[中继] 已收到来自 {sender_name} 的会议室 UDP 中继探测")
+            _probe_recv_log_times[peer_sender_id] = now
+        return True
+    if control_name != "adapt":
+        return True
     peer_sender_id = meta.get("sid")
     if peer_sender_id in (None, _audio_sender_id):
         return True
@@ -485,6 +533,10 @@ def nat_maintenance_thread(udp_sock, username):
         if last_server_ip and last_server_port:
             try:
                 udp_sock.sendto(f"STUN_HELLO {username}".encode("utf-8"), (last_server_ip, last_server_port))
+            except Exception:
+                pass
+            try:
+                _send_room_probe_packets(udp_sock, username)
             except Exception:
                 pass
         time.sleep(2)
