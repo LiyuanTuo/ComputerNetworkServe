@@ -801,7 +801,18 @@ def room_udp_worker(room_id: str):
                                 if target_addr:
                                     try:
                                         relay_sock.sendto(b"RELAY_DATA " + payload, target_addr)
-                                    except: pass
+                                    except Exception as e:
+                                        if now - last_print_time.get(("send_fail", target_name), 0) > 2.0:
+                                            print(f"[{timestamp()}] [房间调试] {room_id} 转发到 {target_name}@{target_addr} 失败: {e}")
+                                            last_print_time[("send_fail", target_name)] = now
+                                else:
+                                    if now - last_print_time.get(("target_missing_addr", target_name), 0) > 2.0:
+                                        print(f"[{timestamp()}] [房间调试] {room_id} 暂未拿到 {target_name} 的 NAT 地址，无法转发")
+                                        last_print_time[("target_missing_addr", target_name)] = now
+                            else:
+                                if now - last_print_time.get(("target_missing", target_name), 0) > 2.0:
+                                    print(f"[{timestamp()}] [房间调试] {room_id} 中继目标 {target_name} 不在当前成员列表中")
+                                    last_print_time[("target_missing", target_name)] = now
 
         except Exception:
             break
