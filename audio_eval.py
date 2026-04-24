@@ -15,7 +15,7 @@
   ts 字段保存发送方 Unix 时间戳，接收方据此计算单向时延。
 
 评分标准:
-  丢包 40 分 | 时延 25 分 | 抖动 20 分 | 乱序 15 分
+    丢包 35 分 | 时延 25 分 | 抖动 20 分 | 乱序 15 分 | 重复 5 分
 """
 
 import csv
@@ -117,9 +117,11 @@ class _SourceTracker:
     def __init__(self):
         self.highest_seq = None
         self.last_seq = None
+        self.seen_seqs = set()
         self.total_expected = 0
         self.total_received = 0
         self.reorder_count = 0
+        self.duplicate_count = 0
         self.delay_sum_ms = 0.0
         self.delay_count = 0
         self.last_recv_time = None
@@ -139,11 +141,22 @@ class _SourceTracker:
             "expected": 0,
             "received": 1,
             "reorder": 0,
+            "duplicate": 0,
             "delay_sum_ms": 0.0,
             "delay_count": 0,
             "jitter_sum_ms": 0.0,
             "jitter_count": 0,
+            "is_duplicate": False,
         }
+
+        if seq in self.seen_seqs:
+            self.duplicate_count += 1
+            delta["received"] = 0
+            delta["duplicate"] = 1
+            delta["is_duplicate"] = True
+            return delta
+
+        self.seen_seqs.add(seq)
 
         self.total_received += 1
 
@@ -234,6 +247,7 @@ class AudioQualityEvaluator:
             "expected": 0,
             "received": 0,
             "reorder": 0,
+            "duplicate": 0,
             "delay_sum_ms": 0.0,
             "delay_count": 0,
             "jitter_sum_ms": 0.0,
@@ -246,6 +260,7 @@ class AudioQualityEvaluator:
             "expected": stats["expected"],
             "received": stats["received"],
             "reorder": stats["reorder"],
+            "duplicate": stats["duplicate"],
             "delay_sum_ms": stats["delay_sum_ms"],
             "delay_count": stats["delay_count"],
             "jitter_sum_ms": stats["jitter_sum_ms"],
@@ -257,6 +272,7 @@ class AudioQualityEvaluator:
         target["expected"] += sign * delta["expected"]
         target["received"] += sign * delta["received"]
         target["reorder"] += sign * delta["reorder"]
+        target["duplicate"] += sign * delta["duplicate"]
         target["delay_sum_ms"] += sign * delta["delay_sum_ms"]
         target["delay_count"] += sign * delta["delay_count"]
         target["jitter_sum_ms"] += sign * delta["jitter_sum_ms"]
@@ -268,6 +284,7 @@ class AudioQualityEvaluator:
             stats["expected"] <= 0
             and stats["received"] <= 0
             and stats["reorder"] <= 0
+            and stats["duplicate"] <= 0
             and stats["delay_count"] <= 0
             and stats["jitter_count"] <= 0
             and abs(stats["delay_sum_ms"]) < 1e-9
@@ -280,6 +297,7 @@ class AudioQualityEvaluator:
             stats["expected"] > 0
             or stats["received"] > 0
             or stats["reorder"] > 0
+            or stats["duplicate"] > 0
             or stats["delay_count"] > 0
             or stats["jitter_count"] > 0
         )
@@ -328,6 +346,7 @@ class AudioQualityEvaluator:
                 metrics["avg_delay_ms"],
                 metrics["avg_jitter_ms"],
                 metrics["reorder_rate"],
+                metrics["duplicate_rate"],
             ))
 
         if not scores:
@@ -341,6 +360,7 @@ class AudioQualityEvaluator:
             metrics["avg_delay_ms"],
             metrics["avg_jitter_ms"],
             metrics["reorder_rate"],
+            metrics["duplicate_rate"],
         )
         avg_score_5s, score_samples_5s = self._compute_recent_score_average(now, sender_id=sender_id, window_sec=5.0)
         if sender_id is None:
@@ -417,7 +437,7 @@ class AudioQualityEvaluator:
             try:
                 with open(self._csv_path, "w", newline="", encoding="utf-8-sig") as f:
                     writer = csv.writer(f)
-                    writer.writerow(["时刻", "丢包率", "时延", "抖动", "乱序", "总分"])
+                    writer.writerow(["时刻", "丢包率", "时延", "抖动", "乱序", "重复", "总分"])
             except Exception:
                 pass
 
@@ -489,7 +509,7 @@ class AudioQualityEvaluator:
             self._live_sender_last_recv[sender_id] = now
 
             if not self.active:
-                return
+                return {"is_duplicate": live_delta.get("is_duplicate", False)}
             if sender_id not in self._sources:
                 self._sources[sender_id] = _SourceTracker()
             delta = self._sources[sender_id].record(seq, send_ts, recv_time=now)
@@ -498,17 +518,19 @@ class AudioQualityEvaluator:
             self._window_stats["expected"] += delta["expected"]
             self._window_stats["received"] += delta["received"]
             self._window_stats["reorder"] += delta["reorder"]
+            self._window_stats["duplicate"] += delta["duplicate"]
             self._window_stats["delay_sum_ms"] += delta["delay_sum_ms"]
             self._window_stats["delay_count"] += delta["delay_count"]
             self._window_stats["jitter_sum_ms"] += delta["jitter_sum_ms"]
             self._window_stats["jitter_count"] += delta["jitter_count"]
+            return {"is_duplicate": delta.get("is_duplicate", False)}
 
     # ---------- 评分函数 ----------
 
     @staticmethod
     def score_loss(rate):
-        """丢包评分 (满分 40)"""
-        if rate <= 0.02: return 40
+        """丢包评分 (满分 35)"""
+        if rate <= 0.02: return 35
         if rate <= 0.05: return 30
         if rate <= 0.10: return 20
         if rate <= 0.20: return 10
@@ -542,13 +564,23 @@ class AudioQualityEvaluator:
         if rate <= 0.20: return 4
         return 0
 
+    @staticmethod
+    def score_duplicate(rate):
+        """重复评分 (满分 5)"""
+        if rate <= 0.02: return 5
+        if rate <= 0.05: return 3
+        if rate <= 0.10: return 2
+        if rate <= 0.20: return 1
+        return 0
+
     @classmethod
-    def score_total(cls, loss_rate, delay_ms, jitter_ms, reorder_rate):
+    def score_total(cls, loss_rate, delay_ms, jitter_ms, reorder_rate, duplicate_rate):
         return (
             cls.score_loss(loss_rate)
             + cls.score_delay(delay_ms)
             + cls.score_jitter(jitter_ms)
             + cls.score_reorder(reorder_rate)
+            + cls.score_duplicate(duplicate_rate)
         )
 
     # ---------- 聚合计算 ----------
@@ -557,21 +589,27 @@ class AudioQualityEvaluator:
         expected = stats["expected"]
         received = stats["received"]
         reorder = stats["reorder"]
+        duplicate = stats["duplicate"]
+        total_arrived = received + duplicate
 
         # 静音/无包场景：expected=0, received=0 时按 0 劣化处理，不报错
         loss_rate = max(0.0, 1.0 - received / expected) if expected > 0 else 0.0
         avg_delay = stats["delay_sum_ms"] / stats["delay_count"] if stats["delay_count"] > 0 else 0.0
         avg_jitter = stats["jitter_sum_ms"] / stats["jitter_count"] if stats["jitter_count"] > 0 else 0.0
         reorder_rate = reorder / received if received > 0 else 0.0
+        duplicate_rate = duplicate / total_arrived if total_arrived > 0 else 0.0
 
         return {
             "total_expected": expected,
             "total_received": received,
+            "total_arrived": total_arrived,
             "loss_rate": loss_rate,
             "avg_delay_ms": avg_delay,
             "avg_jitter_ms": avg_jitter,
             "reorder_count": reorder,
             "reorder_rate": reorder_rate,
+            "duplicate_count": duplicate,
+            "duplicate_rate": duplicate_rate,
         }
 
     def _build_realtime_row_from_stats(self, stats):
@@ -581,6 +619,7 @@ class AudioQualityEvaluator:
             m["avg_delay_ms"],
             m["avg_jitter_ms"],
             m["reorder_rate"],
+            m["duplicate_rate"],
         )
         return {
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -588,6 +627,7 @@ class AudioQualityEvaluator:
             "avg_delay_ms": m["avg_delay_ms"],
             "avg_jitter_ms": m["avg_jitter_ms"],
             "reorder_rate": m["reorder_rate"],
+            "duplicate_rate": m["duplicate_rate"],
             "score": total,
         }
 
@@ -601,6 +641,7 @@ class AudioQualityEvaluator:
                     f"{row['avg_delay_ms']:.2f}",
                     f"{row['avg_jitter_ms']:.2f}",
                     f"{row['reorder_rate'] * 100:.2f}",
+                    f"{row['duplicate_rate'] * 100:.2f}",
                     row["score"],
                 ])
         except Exception:
@@ -633,6 +674,7 @@ class AudioQualityEvaluator:
             total_stats["expected"] += tracker.expected_count()
             total_stats["received"] += tracker.total_received
             total_stats["reorder"] += tracker.reorder_count
+            total_stats["duplicate"] += tracker.duplicate_count
             total_stats["delay_sum_ms"] += tracker.delay_sum_ms
             total_stats["delay_count"] += tracker.delay_count
             total_stats["jitter_sum_ms"] += tracker.jitter_sum_ms
@@ -648,7 +690,8 @@ class AudioQualityEvaluator:
         s_delay   = self.score_delay(m["avg_delay_ms"])
         s_jitter  = self.score_jitter(m["avg_jitter_ms"])
         s_reorder = self.score_reorder(m["reorder_rate"])
-        total     = s_loss + s_delay + s_jitter + s_reorder
+        s_duplicate = self.score_duplicate(m["duplicate_rate"])
+        total     = s_loss + s_delay + s_jitter + s_reorder + s_duplicate
 
         duration = time.time() - self._start_time if self._start_time else 0
 
@@ -663,21 +706,26 @@ class AudioQualityEvaluator:
             "\n--- 原始指标 ---\n"
             f"  期望收包数: {m['total_expected']}\n"
             f"  实际收包数: {m['total_received']}\n"
+            f"  到达包总数: {m['total_arrived']}\n"
             f"  丢包率:     {m['loss_rate']*100:.2f}%\n"
             f"  平均时延:   {m['avg_delay_ms']:.2f} ms\n"
             f"  平均抖动:   {m['avg_jitter_ms']:.2f} ms\n"
             f"  乱序包数:   {m['reorder_count']}\n"
             f"  乱序率:     {m['reorder_rate']*100:.2f}%\n"
+            f"  重复包数:   {m['duplicate_count']}\n"
+            f"  重复率:     {m['duplicate_rate']*100:.2f}%\n"
             "\n--- 评分标准 ---\n"
-            "  丢包(40分): <=2%:40 | <=5%:30 | <=10%:20 | <=20%:10 | >20%:0\n"
+            "  丢包(35分): <=2%:35 | <=5%:30 | <=10%:20 | <=20%:10 | >20%:0\n"
             "  时延(25分): <=200ms:25 | <=500ms:20 | <=750ms:15 | <=1s:10 | <=2s:5 | >2s:0\n"
             "  抖动(20分): <=20ms:20 | <=50ms:15 | <=100ms:10 | <=150ms:5 | >150ms:0\n"
             "  乱序(15分): <=2%:15 | <=5%:12 | <=10%:8 | <=20%:4 | >20%:0\n"
+            "  重复(5分):  <=2%:5 | <=5%:3 | <=10%:2 | <=20%:1 | >20%:0\n"
             "\n--- 分项评分 ---\n"
-            f"  丢包评分:   {s_loss} / 40\n"
+            f"  丢包评分:   {s_loss} / 35\n"
             f"  时延评分:   {s_delay} / 25\n"
             f"  抖动评分:   {s_jitter} / 20\n"
             f"  乱序评分:   {s_reorder} / 15\n"
+            f"  重复评分:   {s_duplicate} / 5\n"
             "\n--- 综合评分 ---\n"
             f"  ★ 总分: {total} / 100\n"
             "======================================\n\n"
