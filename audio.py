@@ -181,6 +181,7 @@ _adaptive_send_profile = "good"
 _peer_feedback_profiles = {}  # {peer_sender_id: {"profile": str, "time": float}}
 _feedback_sent_cache = {}     # {remote_sender_id: {"profile": str, "time": float}}
 _probe_recv_log_times = {}
+_duplicate_drop_log_times = {}
 
 def set_mute(state):
     global udp_voice_mute, pending_mute, audio_stream_active
@@ -425,6 +426,7 @@ def _build_adaptive_feedback_packet(profile_name, snapshot):
         delay_ms=round(snapshot.get("avg_delay_ms", 0.0), 2),
         jitter_ms=round(snapshot.get("avg_jitter_ms", 0.0), 2),
         reorder=round(snapshot.get("reorder_rate", 0.0), 4),
+        duplicate=round(snapshot.get("duplicate_rate", 0.0), 4),
         score=int(snapshot.get("score", 0)),
         window=round(snapshot.get("window_sec", 0.0), 1),
     )
@@ -693,7 +695,16 @@ def udp_audio_recv_thread(udp_sock, username):
                         _handle_control_packet(packet_meta)
                         audio_data = None
                     elif sid is not None:
-                        evaluator.record_packet(sid, seq, send_ts)
+                        packet_result = evaluator.record_packet(sid, seq, send_ts) or {}
+                        if packet_result.get("is_duplicate"):
+                            now = time.time()
+                            last_log_time = _duplicate_drop_log_times.get(sid, 0.0)
+                            if now - last_log_time >= 2.0:
+                                sender_name = _resolve_username_by_sender_id(sid) or str(sid)
+                                _log_to_ui(f"[接收] 已丢弃来自 {sender_name} 的重复语音包 seq={seq}")
+                                _duplicate_drop_log_times[sid] = now
+                            audio_data = None
+                            continue
                         _maybe_send_adaptive_feedback(udp_sock, sid)
                         decoded_audio = _decode_audio_chunk(pcm_data, packet_meta)
                         audio_data = decoded_audio
