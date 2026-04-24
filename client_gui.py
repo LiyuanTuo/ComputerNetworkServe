@@ -8,7 +8,7 @@ import time
 from datetime import datetime
 import re
 
-from audio import record_audio, play_audio, start_realtime_audio, stop_realtime_audio, TEMP_WAV_FILE, set_mute, set_pause
+from audio import record_audio, play_audio, start_realtime_audio, stop_realtime_audio, TEMP_WAV_FILE, set_mute, set_pause, get_audio_backend_notice
 from audio_eval import start_evaluation, stop_evaluation, get_evaluation_output_paths
 
 BUFFER_SIZE = 1024 * 1024
@@ -130,6 +130,8 @@ class VoiceChatApp:
             self.stop_event.clear()
             threading.Thread(target=self.receive_messages_thread, daemon=True).start()
             self.show_main_page()
+            self.append_to_history("广播", get_audio_backend_notice(), "system")
+            self.update_chat_ui()
         except Exception as e:
             messagebox.showerror("连接失败", f"无法连接到服务器:\n{e}")
 

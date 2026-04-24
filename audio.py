@@ -2,7 +2,6 @@
 import socket
 import threading
 import sys
-import pyaudio
 import wave
 import base64
 import os
@@ -10,28 +9,70 @@ import time
 import time
 import math
 import struct
+import zlib
 from audio_eval import (pack_audio_header, unpack_audio_header, make_sender_id, evaluator,
                         PRIORITY_NORMAL, PRIORITY_HIGH)
 
 try:
+    import pyaudio
+except ImportError:
+    pyaudio = None
+
+try:
     import audioop
+    _HAS_AUDIOOP = True
     def get_rms(data): return audioop.rms(data, 2)
 except ImportError:
+    audioop = None
+    _HAS_AUDIOOP = False
     def get_rms(data):
         count = len(data) // 2
         if count == 0: return 0
         shorts = struct.unpack(f"<{count}h", data)
         return math.sqrt(sum(s*s for s in shorts) / count)
 
+if _HAS_AUDIOOP:
+    AUDIO_BACKEND_NOTICE = "[音频] 已启用 audioop 编解码后端。"
+else:
+    AUDIO_BACKEND_NOTICE = (
+        "[音频] 当前 Python 环境未提供 audioop。"
+        "Python 3.13+ 已移除此标准库模块，且它不能通过 pip install audioop 安装；"
+        "程序会自动回退到兼容的 PCM/ZLIB 自适应传输。"
+    )
+
+
+def get_audio_backend_notice():
+    return AUDIO_BACKEND_NOTICE
+
 # 音频录制配置参数
 CHUNK = 1024             # 采样块大小
-FORMAT = pyaudio.paInt16 # 量化位深：16位 (2字节)
+FORMAT = pyaudio.paInt16 if pyaudio else None # 量化位深：16位 (2字节)
 CHANNELS = 1             # 单声道
 RATE = 44100             # 采样率
 VOICE_RATE = 16000       # 实时语音专用的相对较小采样率（节省带宽）
 SILENCE_THRESHOLD = 500  # 语音活动检测(VAD) RMS 阈值，低于此值视为静音不发包
 RECORD_SECONDS = 3       # 默认语音留言时长：3 秒
 TEMP_WAV_FILE = "temp_voice.wav"  # 用于录音写入的临时文件名
+
+PYAUDIO_MISSING_MESSAGE = (
+    "未检测到 PyAudio，语音录制/播放功能不可用。"
+    "请先为当前 Python 版本安装可用的 PyAudio 包。"
+)
+
+AUDIO_CODEC_PCM = "pcm16"
+AUDIO_CODEC_ULAW = "ulaw8"
+AUDIO_CODEC_ADPCM = "adpcm4"
+AUDIO_CODEC_ZLIB = "zlib_pcm16"
+
+ADAPTIVE_PROFILE_ORDER = {"poor": 0, "fair": 1, "good": 2}
+ADAPTIVE_FEEDBACK_INTERVAL = 2.0
+ADAPTIVE_FEEDBACK_TTL = 6.0
+ADAPTIVE_MIN_PACKETS = 4
+ADAPTIVE_PROFILES = {
+    "good": {"sample_rate": 16000, "codec": AUDIO_CODEC_PCM, "label": "良好档"},
+    "fair": {"sample_rate": 12000, "codec": AUDIO_CODEC_ULAW, "label": "均衡档"},
+    "poor": {"sample_rate": 8000, "codec": AUDIO_CODEC_ADPCM, "label": "保守档"},
+}
 
 def record_audio():
     """
@@ -131,6 +172,12 @@ last_server_port = 0
 # 音频评测报头用的序列号和发送者标识
 _audio_seq = 0
 _audio_sender_id = 0
+_control_seq = 0
+
+# 自适应编码状态
+_adaptive_send_profile = "good"
+_peer_feedback_profiles = {}  # {peer_sender_id: {"profile": str, "time": float}}
+_feedback_sent_cache = {}     # {remote_sender_id: {"profile": str, "time": float}}
 
 def set_mute(state):
     global udp_voice_mute, pending_mute, audio_stream_active
@@ -161,10 +208,254 @@ _pyaudio_lock = threading.Lock()
 
 def get_pyaudio():
     global _pyaudio_instance
+    if pyaudio is None:
+        raise RuntimeError(PYAUDIO_MISSING_MESSAGE)
     with _pyaudio_lock:
         if _pyaudio_instance is None:
             _pyaudio_instance = pyaudio.PyAudio()
         return _pyaudio_instance
+
+
+def _get_profile_config(profile_name):
+    profile = dict(ADAPTIVE_PROFILES.get(profile_name, ADAPTIVE_PROFILES["good"]))
+    if not _HAS_AUDIOOP and profile["codec"] in (AUDIO_CODEC_ULAW, AUDIO_CODEC_ADPCM):
+        profile["codec"] = AUDIO_CODEC_ZLIB
+    return profile
+
+
+def _describe_profile(profile_name):
+    profile = _get_profile_config(profile_name)
+    codec_desc = {
+        AUDIO_CODEC_PCM: "PCM",
+        AUDIO_CODEC_ULAW: "u-law",
+        AUDIO_CODEC_ADPCM: "ADPCM",
+        AUDIO_CODEC_ZLIB: "ZLIB",
+    }.get(profile["codec"], profile["codec"])
+    return f"{profile['label']} {profile['sample_rate']}Hz/{codec_desc}"
+
+
+def _select_profile_from_snapshot(snapshot):
+    if not snapshot or not snapshot.get("active"):
+        return None
+    if snapshot.get("total_received", 0) < ADAPTIVE_MIN_PACKETS:
+        return None
+
+    loss_rate = snapshot.get("loss_rate", 0.0)
+    delay_ms = snapshot.get("avg_delay_ms", 0.0)
+    jitter_ms = snapshot.get("avg_jitter_ms", 0.0)
+    reorder_rate = snapshot.get("reorder_rate", 0.0)
+
+    if loss_rate >= 0.12 or delay_ms >= 450 or jitter_ms >= 120 or reorder_rate >= 0.08:
+        return "poor"
+    if loss_rate >= 0.04 or delay_ms >= 220 or jitter_ms >= 50 or reorder_rate >= 0.03:
+        return "fair"
+    return "good"
+
+
+def _resample_pcm16(data, src_rate, dst_rate):
+    if not data or src_rate == dst_rate:
+        return data
+    if _HAS_AUDIOOP:
+        converted, _ = audioop.ratecv(data, 2, CHANNELS, src_rate, dst_rate, None)
+        return converted
+
+    sample_count = len(data) // 2
+    if sample_count <= 0:
+        return b""
+    samples = struct.unpack(f"<{sample_count}h", data[:sample_count * 2])
+    dst_count = max(1, int(round(sample_count * dst_rate / src_rate)))
+    out = []
+    for idx in range(dst_count):
+        src_idx = min(sample_count - 1, int(idx * src_rate / dst_rate))
+        out.append(samples[src_idx])
+    return struct.pack(f"<{dst_count}h", *out)
+
+
+def _encode_audio_chunk(pcm_data, profile_name):
+    profile = _get_profile_config(profile_name)
+    sample_rate = profile["sample_rate"]
+    codec = profile["codec"]
+    working = _resample_pcm16(pcm_data, VOICE_RATE, sample_rate)
+
+    if codec == AUDIO_CODEC_PCM:
+        encoded = working
+    elif codec == AUDIO_CODEC_ULAW:
+        encoded = audioop.lin2ulaw(working, 2)
+    elif codec == AUDIO_CODEC_ADPCM:
+        encoded, _ = audioop.lin2adpcm(working, 2, None)
+    elif codec == AUDIO_CODEC_ZLIB:
+        encoded = zlib.compress(working, level=6)
+    else:
+        codec = AUDIO_CODEC_PCM
+        encoded = working
+
+    meta = {
+        "kind": "audio",
+        "codec": codec,
+        "sr": sample_rate,
+        "channels": CHANNELS,
+        "profile": profile_name,
+    }
+    return encoded, meta
+
+
+def _decode_audio_chunk(payload, meta):
+    codec = meta.get("codec", AUDIO_CODEC_PCM)
+    sample_rate = int(meta.get("sr", VOICE_RATE) or VOICE_RATE)
+    if sample_rate <= 0:
+        sample_rate = VOICE_RATE
+
+    try:
+        if codec == AUDIO_CODEC_PCM:
+            pcm_data = payload
+        elif codec == AUDIO_CODEC_ULAW:
+            if not _HAS_AUDIOOP:
+                raise RuntimeError("当前环境缺少 u-law 解码能力")
+            pcm_data = audioop.ulaw2lin(payload, 2)
+        elif codec == AUDIO_CODEC_ADPCM:
+            if not _HAS_AUDIOOP:
+                raise RuntimeError("当前环境缺少 ADPCM 解码能力")
+            pcm_data, _ = audioop.adpcm2lin(payload, 2, None)
+        elif codec == AUDIO_CODEC_ZLIB:
+            pcm_data = zlib.decompress(payload)
+        else:
+            pcm_data = payload
+    except Exception as e:
+        _log_to_ui(f"音频解码失败: {e}")
+        return None
+
+    return _resample_pcm16(pcm_data, sample_rate, VOICE_RATE)
+
+
+def _reset_adaptive_state_unlocked():
+    global _adaptive_send_profile, _control_seq
+    _adaptive_send_profile = "good"
+    _control_seq = 0
+    _peer_feedback_profiles.clear()
+    _feedback_sent_cache.clear()
+
+
+def _prune_peer_feedback_unlocked(now):
+    stale_peers = [
+        peer_id
+        for peer_id, info in _peer_feedback_profiles.items()
+        if now - info["time"] > ADAPTIVE_FEEDBACK_TTL
+    ]
+    for peer_id in stale_peers:
+        _peer_feedback_profiles.pop(peer_id, None)
+
+
+def _recompute_send_profile_unlocked(now=None):
+    global _adaptive_send_profile
+    if now is None:
+        now = time.time()
+    _prune_peer_feedback_unlocked(now)
+
+    target_profile = "good"
+    if _peer_feedback_profiles:
+        target_profile = min(
+            (info["profile"] for info in _peer_feedback_profiles.values()),
+            key=lambda name: ADAPTIVE_PROFILE_ORDER.get(name, ADAPTIVE_PROFILE_ORDER["good"]),
+        )
+
+    if target_profile != _adaptive_send_profile:
+        _adaptive_send_profile = target_profile
+        _log_to_ui(f"[自适应] 上行语音已切换为 {_describe_profile(target_profile)}")
+
+    return _adaptive_send_profile
+
+
+def _get_current_send_profile():
+    with audio_state_lock:
+        return _recompute_send_profile_unlocked()
+
+
+def _register_peer_feedback(peer_sender_id, profile_name):
+    if profile_name not in ADAPTIVE_PROFILES:
+        profile_name = "good"
+    with audio_state_lock:
+        _peer_feedback_profiles[peer_sender_id] = {"profile": profile_name, "time": time.time()}
+        _recompute_send_profile_unlocked()
+
+
+def _resolve_username_by_sender_id(sender_id):
+    if sender_id is None:
+        return None
+    if last_username and sender_id == _audio_sender_id:
+        return last_username
+    for member_name in list(room_members.keys()):
+        try:
+            if make_sender_id(member_name) == sender_id:
+                return member_name
+        except Exception:
+            continue
+    return None
+
+
+def _build_adaptive_feedback_packet(profile_name, snapshot):
+    global _control_seq
+    _control_seq += 1
+    return pack_audio_header(
+        _audio_sender_id,
+        _control_seq,
+        time.time(),
+        priority=PRIORITY_HIGH,
+        kind="control",
+        control="adapt",
+        recommend=profile_name,
+        loss=round(snapshot.get("loss_rate", 0.0), 4),
+        delay_ms=round(snapshot.get("avg_delay_ms", 0.0), 2),
+        jitter_ms=round(snapshot.get("avg_jitter_ms", 0.0), 2),
+        reorder=round(snapshot.get("reorder_rate", 0.0), 4),
+        score=int(snapshot.get("score", 0)),
+        window=round(snapshot.get("window_sec", 0.0), 1),
+    )
+
+
+def _maybe_send_adaptive_feedback(udp_sock, remote_sender_id):
+    if remote_sender_id in (None, 0, _audio_sender_id):
+        return
+
+    snapshot = evaluator.get_live_snapshot(sender_id=remote_sender_id)
+    profile_name = _select_profile_from_snapshot(snapshot)
+    if not profile_name:
+        return
+
+    now = time.time()
+    with audio_state_lock:
+        cache = _feedback_sent_cache.get(remote_sender_id)
+        if cache and cache["profile"] == profile_name and (now - cache["time"] < ADAPTIVE_FEEDBACK_INTERVAL):
+            return
+        server_addr = (last_server_ip, last_server_port)
+        room_id = last_room_id
+        username = last_username
+        packet = _build_adaptive_feedback_packet(profile_name, snapshot)
+        _feedback_sent_cache[remote_sender_id] = {"profile": profile_name, "time": now}
+
+    if not server_addr[0] or not server_addr[1]:
+        return
+
+    try:
+        if room_id:
+            target_name = _resolve_username_by_sender_id(remote_sender_id)
+            if not target_name or target_name == username:
+                return
+            relay_header = f"RELAY {username} {target_name} ".encode("utf-8")
+            udp_sock.sendto(relay_header + packet, server_addr)
+        else:
+            udp_sock.sendto(packet, server_addr)
+    except Exception:
+        pass
+
+
+def _handle_control_packet(meta):
+    if meta.get("kind") != "control" or meta.get("control") != "adapt":
+        return False
+    peer_sender_id = meta.get("sid")
+    if peer_sender_id in (None, _audio_sender_id):
+        return True
+    _register_peer_feedback(peer_sender_id, meta.get("recommend", "good"))
+    return True
 
 def nat_maintenance_thread(udp_sock, username):
     """
@@ -211,15 +502,17 @@ def udp_audio_send_thread(udp_sock, server_ip, server_port, username, room_id):
                 
                 if rms_val > SILENCE_THRESHOLD:
                     # 封装评测报头: [priority 1B][magic 4B][JSON_LEN 4B][JSON NB] + PCM
+                    current_profile = _get_current_send_profile()
+                    encoded_data, packet_meta = _encode_audio_chunk(data, current_profile)
                     _audio_seq += 1
                     # RMS 超过阈值 3 倍以上视为强语音，标记高优先级
                     prio = PRIORITY_HIGH if rms_val > SILENCE_THRESHOLD * 3 else PRIORITY_NORMAL
-                    audio_hdr = pack_audio_header(_audio_sender_id, _audio_seq, time.time(), priority=prio)
-                    payload = audio_hdr + data
+                    audio_hdr = pack_audio_header(_audio_sender_id, _audio_seq, time.time(), priority=prio, **packet_meta)
+                    payload = audio_hdr + encoded_data
 
                     now = time.time()
                     if now - last_send_print_time > 2.0:
-                        _log_to_ui(f"[发送] 音量: {rms_val:.0f} 包大小: {len(payload)}B")
+                        _log_to_ui(f"[发送] 档位: {_describe_profile(current_profile)} 音量: {rms_val:.0f} 包大小: {len(payload)}B")
                         
                         last_send_print_time = now
 
@@ -325,10 +618,20 @@ def udp_audio_recv_thread(udp_sock, username):
                 # 将音频数据放入混音缓冲区
                 if audio_data and source_key and audio_stream_active and not udp_voice_pause:
                     # 解析评测报头，提取序列号和时间戳用于质量评测
-                    sid, seq, send_ts, priority, pcm_data = unpack_audio_header(audio_data)
-                    if sid is not None:
+                    sid, seq, send_ts, priority, pcm_data, packet_meta = unpack_audio_header(audio_data)
+                    packet_kind = packet_meta.get("kind", "audio") if sid is not None else "audio"
+
+                    if packet_kind == "control":
+                        _handle_control_packet(packet_meta)
+                        audio_data = None
+                    elif sid is not None:
                         evaluator.record_packet(sid, seq, send_ts)
-                        audio_data = pcm_data
+                        _maybe_send_adaptive_feedback(udp_sock, sid)
+                        decoded_audio = _decode_audio_chunk(pcm_data, packet_meta)
+                        audio_data = decoded_audio
+
+                    if not audio_data:
+                        continue
 
                     if source_key not in mix_sources:
                         mix_sources[source_key] = []
@@ -391,6 +694,8 @@ def init_udp_session(server_ip, server_port, username="", room_id=""):
         # 初始化评测报头用的序列号和发送者标识
         _audio_seq = 0
         _audio_sender_id = make_sender_id(username) if username else 0
+        evaluator.reset_live_state()
+        _reset_adaptive_state_unlocked()
         
         last_server_ip = server_ip
         last_server_port = server_port
@@ -468,6 +773,7 @@ def close_udp_session():
     完全关闭UDP会话，停止所有相关线程，释放资源。
     """
     global udp_session_active, udp_voice_socket, nat_thread_obj, audio_recv_thread_obj
+    global last_room_id
     with audio_state_lock:
         if not udp_session_active: return
         
@@ -493,6 +799,10 @@ def close_udp_session():
 
     # 清理全局状态，防止残留影响下次会话
     room_members.clear()
+    evaluator.reset_live_state()
+    with audio_state_lock:
+        last_room_id = ""
+        _reset_adaptive_state_unlocked()
 
 def start_realtime_audio(server_ip, server_port, username="", room_id=""):
     """

@@ -24,6 +24,7 @@ import struct
 import time
 import threading
 import zlib
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 
@@ -89,23 +90,23 @@ def pack_audio_header(sender_id: int, seq: int, timestamp: float,
 def unpack_audio_header(data: bytes):
     """
     解析音频 JSON 帧头（含首字节优先级字段）。
-    返回 (sender_id, seq, send_ts, priority, pcm_data)。
-    若不含有效帧头（magic 不匹配或数据不完整），返回 (None, None, None, None, 原始data)。
+    返回 (sender_id, seq, send_ts, priority, pcm_data, meta)。
+    若不含有效帧头（magic 不匹配或数据不完整），返回 (None, None, None, None, 原始data, {})。
     """
     if (len(data) < _HEADER_PREFIX_SIZE or
             data[_MAGIC_OFFSET:_MAGIC_OFFSET + _MAGIC_SIZE] != PACKET_MAGIC):
-        return None, None, None, None, data
+        return None, None, None, None, data, {}
     priority = data[0]
     json_len = struct.unpack("!I", data[_JSON_LEN_OFFSET:_JSON_LEN_OFFSET + _LEN_FIELD_SIZE])[0]
     total_header = _HEADER_PREFIX_SIZE + json_len
     if len(data) < total_header:
-        return None, None, None, None, data
+        return None, None, None, None, data, {}
     try:
         meta = _json.loads(data[_HEADER_PREFIX_SIZE:total_header].decode("utf-8"))
         pcm_data = data[total_header:]
-        return meta.get("sid"), meta.get("seq"), meta.get("ts"), priority, pcm_data
+        return meta.get("sid"), meta.get("seq"), meta.get("ts"), priority, pcm_data, meta
     except Exception:
-        return None, None, None, None, data
+        return None, None, None, None, data, {}
 
 
 # ===================== 单源指标追踪器 =====================
@@ -126,12 +127,13 @@ class _SourceTracker:
         self.jitter_sum_ms = 0.0
         self.jitter_count = 0
 
-    def record(self, seq, send_ts):
+    def record(self, seq, send_ts, recv_time=None):
         """
         记录一个数据包。
         返回该包对统计量的增量，用于“每秒窗口统计”。
         """
-        recv_time = time.time()
+        if recv_time is None:
+            recv_time = time.time()
 
         delta = {
             "expected": 0,
@@ -211,6 +213,21 @@ class AudioQualityEvaluator:
         # 每秒窗口统计，静音时该窗口会保持全 0
         self._window_stats = self._blank_stats()
 
+        # 自适应控制使用的滚动窗口统计（无论是否显式开启评测都持续维护）
+        self._live_window_sec = 6.0
+        self._live_sources = {}          # {sender_id: _SourceTracker}
+        self._live_events = deque()      # [(recv_time, sender_id, delta_stats), ...]
+        self._live_window_stats = self._blank_stats()
+        self._live_sender_stats = {}     # {sender_id: stats_dict}
+        self._live_sender_last_recv = {} # {sender_id: recv_time}
+
+    def _reset_live_state_unlocked(self):
+        self._live_sources.clear()
+        self._live_events.clear()
+        self._live_window_stats = self._blank_stats()
+        self._live_sender_stats.clear()
+        self._live_sender_last_recv.clear()
+
     @staticmethod
     def _blank_stats():
         return {
@@ -224,6 +241,40 @@ class AudioQualityEvaluator:
         }
 
     @staticmethod
+    def _copy_stats(stats):
+        return {
+            "expected": stats["expected"],
+            "received": stats["received"],
+            "reorder": stats["reorder"],
+            "delay_sum_ms": stats["delay_sum_ms"],
+            "delay_count": stats["delay_count"],
+            "jitter_sum_ms": stats["jitter_sum_ms"],
+            "jitter_count": stats["jitter_count"],
+        }
+
+    @staticmethod
+    def _merge_stats(target, delta, sign=1):
+        target["expected"] += sign * delta["expected"]
+        target["received"] += sign * delta["received"]
+        target["reorder"] += sign * delta["reorder"]
+        target["delay_sum_ms"] += sign * delta["delay_sum_ms"]
+        target["delay_count"] += sign * delta["delay_count"]
+        target["jitter_sum_ms"] += sign * delta["jitter_sum_ms"]
+        target["jitter_count"] += sign * delta["jitter_count"]
+
+    @staticmethod
+    def _stats_is_zero(stats):
+        return (
+            stats["expected"] <= 0
+            and stats["received"] <= 0
+            and stats["reorder"] <= 0
+            and stats["delay_count"] <= 0
+            and stats["jitter_count"] <= 0
+            and abs(stats["delay_sum_ms"]) < 1e-9
+            and abs(stats["jitter_sum_ms"]) < 1e-9
+        )
+
+    @staticmethod
     def _has_stats_activity(stats):
         return (
             stats["expected"] > 0
@@ -232,6 +283,62 @@ class AudioQualityEvaluator:
             or stats["delay_count"] > 0
             or stats["jitter_count"] > 0
         )
+
+    def _trim_live_events(self, now):
+        expire_before = now - self._live_window_sec
+        while self._live_events and self._live_events[0][0] < expire_before:
+            _, sender_id, delta = self._live_events.popleft()
+            self._merge_stats(self._live_window_stats, delta, sign=-1)
+            sender_stats = self._live_sender_stats.get(sender_id)
+            if sender_stats is not None:
+                self._merge_stats(sender_stats, delta, sign=-1)
+                if self._stats_is_zero(sender_stats):
+                    self._live_sender_stats.pop(sender_id, None)
+                    last_recv = self._live_sender_last_recv.get(sender_id)
+                    if last_recv is not None and last_recv < expire_before:
+                        self._live_sender_last_recv.pop(sender_id, None)
+
+    def _build_live_snapshot(self, stats, now, sender_id=None):
+        metrics = self._metrics_from_stats(stats)
+        metrics["score"] = self.score_total(
+            metrics["loss_rate"],
+            metrics["avg_delay_ms"],
+            metrics["avg_jitter_ms"],
+            metrics["reorder_rate"],
+        )
+        if sender_id is None:
+            active_ages = []
+            for sid in self._live_sender_stats:
+                last_recv = self._live_sender_last_recv.get(sid)
+                if last_recv is not None:
+                    active_ages.append(max(0.0, now - last_recv))
+            last_packet_age = min(active_ages) if active_ages else None
+        else:
+            last_recv = self._live_sender_last_recv.get(sender_id)
+            last_packet_age = None if last_recv is None else max(0.0, now - last_recv)
+
+        metrics["window_sec"] = self._live_window_sec
+        metrics["last_packet_age_sec"] = last_packet_age
+        metrics["active"] = (
+            last_packet_age is not None
+            and last_packet_age <= self._live_window_sec
+            and metrics["total_received"] > 0
+        )
+        return metrics
+
+    def get_live_snapshot(self, sender_id=None):
+        with self._lock:
+            now = time.time()
+            self._trim_live_events(now)
+            if sender_id is None:
+                stats = self._copy_stats(self._live_window_stats)
+            else:
+                stats = self._copy_stats(self._live_sender_stats.get(sender_id, self._blank_stats()))
+            return self._build_live_snapshot(stats, now, sender_id=sender_id)
+
+    def reset_live_state(self):
+        with self._lock:
+            self._reset_live_state_unlocked()
 
     # ---------- 控制 ----------
 
@@ -329,11 +436,24 @@ class AudioQualityEvaluator:
 
     def record_packet(self, sender_id, seq, send_ts):
         with self._lock:
+            now = time.time()
+
+            if sender_id not in self._live_sources:
+                self._live_sources[sender_id] = _SourceTracker()
+            live_delta = self._live_sources[sender_id].record(seq, send_ts, recv_time=now)
+            self._trim_live_events(now)
+            self._live_events.append((now, sender_id, live_delta))
+            self._merge_stats(self._live_window_stats, live_delta)
+            if sender_id not in self._live_sender_stats:
+                self._live_sender_stats[sender_id] = self._blank_stats()
+            self._merge_stats(self._live_sender_stats[sender_id], live_delta)
+            self._live_sender_last_recv[sender_id] = now
+
             if not self.active:
                 return
             if sender_id not in self._sources:
                 self._sources[sender_id] = _SourceTracker()
-            delta = self._sources[sender_id].record(seq, send_ts)
+            delta = self._sources[sender_id].record(seq, send_ts, recv_time=now)
 
             # 同步累计到“每秒窗口统计”
             self._window_stats["expected"] += delta["expected"]
@@ -558,6 +678,16 @@ def start_evaluation(
 def get_evaluation_output_paths():
     """返回当前评测的输出文件路径：(report_path, csv_path)"""
     return evaluator.get_output_paths()
+
+
+def get_live_evaluation_snapshot(sender_id=None):
+    """返回最近滚动窗口内的实时网络质量快照，可按发送者区分。"""
+    return evaluator.get_live_snapshot(sender_id=sender_id)
+
+
+def reset_live_evaluation_snapshot():
+    """清空自适应控制使用的滚动窗口统计。"""
+    evaluator.reset_live_state()
 
 
 def stop_evaluation():
