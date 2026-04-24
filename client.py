@@ -17,10 +17,7 @@ TCP 聊天客户端 (带语音留言功能)
 import socket
 import threading
 import sys
-import pyaudio
-import wave
 import base64
-import os
 import json
 from audio import * 
 from audio_eval import start_evaluation, stop_evaluation, get_evaluation_output_paths
@@ -221,6 +218,7 @@ def start_client():
     print("=" * 50)
     print("  局域网聊天客户端")
     print("=" * 50)
+    print(get_audio_backend_notice())
 
     global client_username
 
