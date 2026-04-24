@@ -298,6 +298,42 @@ class AudioQualityEvaluator:
                     if last_recv is not None and last_recv < expire_before:
                         self._live_sender_last_recv.pop(sender_id, None)
 
+    def _compute_recent_score_average(self, now, sender_id=None, window_sec=5.0):
+        if window_sec <= 0:
+            return None, 0
+
+        bucket_stats = {}
+        bucket_cutoff = int(now - window_sec)
+        for recv_time, event_sender_id, delta in self._live_events:
+            if recv_time < now - window_sec:
+                continue
+            if sender_id is not None and event_sender_id != sender_id:
+                continue
+            bucket_key = int(recv_time)
+            if bucket_key < bucket_cutoff:
+                continue
+            stats = bucket_stats.setdefault(bucket_key, self._blank_stats())
+            self._merge_stats(stats, delta)
+
+        if not bucket_stats:
+            return None, 0
+
+        scores = []
+        for stats in bucket_stats.values():
+            if not self._has_stats_activity(stats):
+                continue
+            metrics = self._metrics_from_stats(stats)
+            scores.append(self.score_total(
+                metrics["loss_rate"],
+                metrics["avg_delay_ms"],
+                metrics["avg_jitter_ms"],
+                metrics["reorder_rate"],
+            ))
+
+        if not scores:
+            return None, 0
+        return sum(scores) / len(scores), len(scores)
+
     def _build_live_snapshot(self, stats, now, sender_id=None):
         metrics = self._metrics_from_stats(stats)
         metrics["score"] = self.score_total(
@@ -306,6 +342,7 @@ class AudioQualityEvaluator:
             metrics["avg_jitter_ms"],
             metrics["reorder_rate"],
         )
+        avg_score_5s, score_samples_5s = self._compute_recent_score_average(now, sender_id=sender_id, window_sec=5.0)
         if sender_id is None:
             active_ages = []
             for sid in self._live_sender_stats:
@@ -318,6 +355,8 @@ class AudioQualityEvaluator:
             last_packet_age = None if last_recv is None else max(0.0, now - last_recv)
 
         metrics["window_sec"] = self._live_window_sec
+        metrics["avg_score_5s"] = avg_score_5s
+        metrics["score_samples_5s"] = score_samples_5s
         metrics["last_packet_age_sec"] = last_packet_age
         metrics["active"] = (
             last_packet_age is not None

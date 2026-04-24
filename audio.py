@@ -71,7 +71,7 @@ ADAPTIVE_FEEDBACK_TTL = 6.0
 ADAPTIVE_MIN_PACKETS = 4
 ROOM_RELAY_PROBE_LOG_INTERVAL = 6.0
 ADAPTIVE_PROFILES = {
-    "good": {"sample_rate": 16000, "codec": AUDIO_CODEC_PCM, "label": "良好档"},
+    "good": {"sample_rate": 16000, "codec": AUDIO_CODEC_PCM, "label": "最好档"},
     "fair": {"sample_rate": 12000, "codec": AUDIO_CODEC_ULAW, "label": "均衡档"},
     "poor": {"sample_rate": 8000, "codec": AUDIO_CODEC_ADPCM, "label": "保守档"},
 }
@@ -259,16 +259,15 @@ def _select_profile_from_snapshot(snapshot):
     if snapshot.get("total_received", 0) < ADAPTIVE_MIN_PACKETS:
         return None
 
-    loss_rate = snapshot.get("loss_rate", 0.0)
-    delay_ms = snapshot.get("avg_delay_ms", 0.0)
-    jitter_ms = snapshot.get("avg_jitter_ms", 0.0)
-    reorder_rate = snapshot.get("reorder_rate", 0.0)
+    avg_score_5s = snapshot.get("avg_score_5s")
+    if avg_score_5s is None:
+        return None
 
-    if loss_rate >= 0.12 or delay_ms >= 450 or jitter_ms >= 120 or reorder_rate >= 0.08:
-        return "poor"
-    if loss_rate >= 0.04 or delay_ms >= 220 or jitter_ms >= 50 or reorder_rate >= 0.03:
+    if avg_score_5s >= 85:
+        return "good"
+    if avg_score_5s >= 70:
         return "fair"
-    return "good"
+    return "poor"
 
 
 def _resample_pcm16(data, src_rate, dst_rate):
