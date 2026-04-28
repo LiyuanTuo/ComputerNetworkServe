@@ -79,7 +79,7 @@ def pack_audio_header(sender_id: int, seq: int, timestamp: float,
     帧格式：[PRIORITY 1B][MAGIC 4B][JSON_LEN 4B big-endian][JSON_UTF8 NB]
     priority: 包重要性 (0=低, 1=普通, 2=高)；extra 中的额外字段会合并进 JSON。
     """
-    meta = {"v": 1, "sid": sender_id, "seq": seq, "ts": round(timestamp, 6)}
+    meta = {"v": 2, "sid": sender_id, "seq": seq, "ts": round(timestamp, 6)}
     meta.update(extra)
     json_bytes = _json.dumps(meta, separators=(",", ":")).encode("utf-8")
     prio_byte = bytes([max(0, min(255, int(priority)))])
