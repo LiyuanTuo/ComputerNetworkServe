@@ -20,7 +20,7 @@ except ImportError:
     pyaudio = None
 
 try:
-    import audioop
+    import audioop_lts as audioop
     _HAS_AUDIOOP = True
     def get_rms(data): return audioop.rms(data, 2)
 except ImportError:
