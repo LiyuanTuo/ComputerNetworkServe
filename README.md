@@ -61,6 +61,8 @@ ComputerNetworkServe/
 | `/voice @P1` | 单独向P1发送语音 |
 | `/call @p1` | 单独向P1发起语音通话 |
 | `/realtime -quit` | 挂断语音电话 |
+| `/eval_start` | 开始网络音频质量测评（写入 eval_net 下 csv/txt） |
+| `/eval_stop` | 结束测评并输出汇总报告（同时自动生成堆叠图 png） |
 
 
 
@@ -163,6 +165,35 @@ ComputerNetworkServe/
 | `profile` | 当前发送档位 |
 
 当 `kind=control` 且 `control=adapt` 时，报文体为空，JSON 中额外携带 `recommend`、`loss`、`delay_ms`、`jitter_ms`、`reorder`、`score` 等反馈字段，用于驱动发送端调档。
+
+### 2.3 评测 CSV 可视化（堆叠柱状图）
+
+项目内提供脚本 `audio_eval_visualize.py`，可读取 `eval_net` 下实时评测 CSV，按评分标准计算分项得分，并生成：
+
+- 分项评分堆叠柱状图（丢包/时延/抖动/乱序/重复）
+- 总评分折线（叠加在柱状图上）
+
+示例：
+
+```bash
+python audio_eval_visualize.py --csv eval_net/audio_quality_realtime_20260417_152043.csv
+```
+
+依赖：
+
+- 生成图表需要安装 `matplotlib`：`pip install matplotlib`
+
+说明：
+
+- 客户端执行 `/eval_stop` 结束测评时，会在生成 txt 报告的同时，基于实时 CSV 自动生成同目录的堆叠图 png（文件名形如 `*_stacked_scores.png`）。
+- 若运行环境缺少 `matplotlib`，则不会影响测评报告生成，只是跳过绘图。
+
+可选参数：
+
+- `--out` 指定输出图片路径（默认输出到同目录）
+- `--title` 自定义图标题
+- `--max-bars` 控制最多显示柱子数量（超出自动抽样）
+- `--show` 生成后弹窗显示
 
 ### 3. TCP 三次握手（建立连接）
 

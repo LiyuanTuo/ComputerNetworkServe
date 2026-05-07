@@ -431,8 +431,19 @@ def start_client():
                 report = stop_evaluation()
                 if report:
                     report_path, csv_path = get_evaluation_output_paths()
+                    try:
+                        from audio_eval import get_evaluation_plot_path, get_evaluation_plot_error
+                        plot_path = get_evaluation_plot_path()
+                        plot_err = get_evaluation_plot_error()
+                    except Exception:
+                        plot_path = ""
+                        plot_err = ""
                     print(f"[系统] 测评已结束：汇总报告已保存至 {report_path}")
                     print(f"[系统] 实时明细已保存至 {csv_path}")
+                    if plot_path:
+                        print(f"[系统] 堆叠图已生成：{plot_path}")
+                    elif plot_err:
+                        print(f"[系统] 堆叠图生成失败：{plot_err}")
                     print(report)
                 else:
                     print("[系统] 测评未在进行中")

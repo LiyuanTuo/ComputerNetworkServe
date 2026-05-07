@@ -27,6 +27,7 @@ import zlib
 from collections import deque
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 # ===================== UDP 音频报头 =====================
 
@@ -216,6 +217,8 @@ class AudioQualityEvaluator:
         self._sources = {}          # {sender_id: _SourceTracker}
         self._report_path = ""
         self._csv_path = ""
+        self._plot_path = ""
+        self._plot_error = ""
         self._interval_sec = 1.0
         self._tick_callback = None
         self._start_time = None
@@ -427,6 +430,8 @@ class AudioQualityEvaluator:
             self._window_stats = self._blank_stats()
             self._report_path = report_path
             self._csv_path = csv_path
+            self._plot_path = ""
+            self._plot_error = ""
             self._interval_sec = interval_sec
             self._tick_callback = tick_callback
             self._start_time = time.time()
@@ -448,7 +453,7 @@ class AudioQualityEvaluator:
             )
             self._monitor_thread.start()
 
-    def stop(self):
+    def stop(self, generate_plot: bool = True, plot_path: Optional[str] = None, plot_title: str = "网络音频质量分项评分"):
         monitor_thread = None
 
         with self._lock:
@@ -472,6 +477,9 @@ class AudioQualityEvaluator:
         if final_row is not None:
             self._append_csv_row(final_row)
 
+        if generate_plot:
+            self._try_generate_plot(plot_path=plot_path, plot_title=plot_title)
+
         with self._lock:
             report = self._generate_report()
             try:
@@ -482,6 +490,39 @@ class AudioQualityEvaluator:
             self._monitor_thread = None
             self._tick_callback = None
             return report
+
+    def get_plot_path(self):
+        with self._lock:
+            return self._plot_path
+
+    def get_plot_error(self):
+        with self._lock:
+            return self._plot_error
+
+    def _try_generate_plot(self, plot_path: Optional[str], plot_title: str):
+        # 这里必须“容错”：绘图只是附加能力，不能影响主流程
+        with self._lock:
+            csv_path = self._csv_path
+            self._plot_path = ""
+            self._plot_error = ""
+
+        if not csv_path:
+            return
+
+        try:
+            from audio_eval_visualize import load_and_score, plot_scores
+
+            csv_file = Path(csv_path)
+            out_path = Path(plot_path) if plot_path else csv_file.with_name(csv_file.stem + "_stacked_scores.png")
+            rows = load_and_score(csv_file)
+            plot_scores(rows, out_path, title=plot_title, show=False, max_bars=300)
+
+            with self._lock:
+                self._plot_path = str(out_path)
+
+        except Exception as e:
+            with self._lock:
+                self._plot_error = f"{type(e).__name__}: {e}"
 
     def get_output_paths(self):
         with self._lock:
@@ -767,6 +808,16 @@ def get_evaluation_output_paths():
     return evaluator.get_output_paths()
 
 
+def get_evaluation_plot_path():
+    """返回最近一次 stop_evaluation 自动生成的堆叠图路径（未生成则为空字符串）。"""
+    return evaluator.get_plot_path()
+
+
+def get_evaluation_plot_error():
+    """返回最近一次绘图失败原因（仅用于调试；成功则为空字符串）。"""
+    return evaluator.get_plot_error()
+
+
 def get_live_evaluation_snapshot(sender_id=None):
     """返回最近滚动窗口内的实时网络质量快照，可按发送者区分。"""
     return evaluator.get_live_snapshot(sender_id=sender_id)
@@ -779,4 +830,4 @@ def reset_live_evaluation_snapshot():
 
 def stop_evaluation():
     """结束音频质量评测，返回评测报告文本"""
-    return evaluator.stop()
+    return evaluator.stop(generate_plot=True)

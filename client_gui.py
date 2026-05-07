@@ -817,9 +817,22 @@ class VoiceChatApp:
         report = stop_evaluation()
         if report:
             report_path, csv_path = get_evaluation_output_paths()
+            try:
+                from audio_eval import get_evaluation_plot_path, get_evaluation_plot_error
+                plot_path = get_evaluation_plot_path()
+                plot_err = get_evaluation_plot_error()
+            except Exception:
+                plot_path = ""
+                plot_err = ""
+            if plot_path:
+                extra = f"；堆叠图在 {plot_path}"
+            elif plot_err:
+                extra = f"；堆叠图生成失败：{plot_err}"
+            else:
+                extra = ""
             self.append_to_history(
                 self.current_chat_target,
-                f"[系统] 测评已结束：汇总报告已保存至 {report_path}；实时明细在 {csv_path}\n{report}",
+                f"[系统] 测评已结束：汇总报告已保存至 {report_path}；实时明细在 {csv_path}{extra}\n{report}",
                 "system"
             )
         else:
