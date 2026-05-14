@@ -7,13 +7,11 @@ TCP 聊天客户端 (带语音留言功能)
   3. 在独立线程中接收服务器推送的消息
   4. 主线程负责读取用户输入并发送
   5. 支持录制音频并发送为语音留言
-
 原理：
   - 客户端创建 TCP Socket 连接到服务器的 IP:PORT
   - 使用一个接收线程持续监听服务器消息（非阻塞体验）
   - 主线程阻塞在 input() 上等待用户输入
 """
-
 import socket
 import threading
 import sys
@@ -26,16 +24,12 @@ from common.ports import DEFAULT_SERVER_IP, SERVER_TCP_PORT
 # 对于音频传输，普通的 4096 缓冲区不够大，改为 1MB
 BUFFER_SIZE = 1024 * 1024 
 ENCODING = "utf-8"
-
 # ==== 实时语音状态控制 ====
 current_pending_port = None
-
 # ==== 联系人在线状态 ====
 contact_status: dict[str, str] = {}  # {联系人用户名: "online"/"offline"}
 client_username = ""
 current_room_id = ""
-
-
 def _print_eval_tick(row):
     """每秒输出一次评测结果（由 audio_eval 后台线程回调）。"""
     print(
@@ -46,7 +40,6 @@ def _print_eval_tick(row):
         f"乱序={row['reorder_rate'] * 100:.2f}% "
         f"总分={row['score']}/100"
     )
-
 def receive_messages(sock: socket.socket, stop_event: threading.Event, server_ip: str):
     """
     接收线程：持续从服务器接收消息并处理，包含解析 Base64 音频
@@ -66,11 +59,9 @@ def receive_messages(sock: socket.socket, stop_event: threading.Event, server_ip
             # 按换行符分割后逐行处理，避免 startswith() 只匹配第一条消息
             lines = message.split("\n")
             need_prompt = False  # 是否需要在最后重新显示输入提示符
-
             for line in lines:
                 if not line.strip():
                     continue
-
                 # --- 处理联系人在线状态推送 ---
                 if line.startswith("/CONTACT_STATUS "):
                     parts = line.strip().split(" ")
@@ -88,7 +79,6 @@ def receive_messages(sock: socket.socket, stop_event: threading.Event, server_ip
                                 print(f"\r[通讯录] 联系人 '{contact_name}' {hint}")
                                 need_prompt = True
                     continue
-
                 # --- 处理实时语音呼叫信令 ---
                 if line.startswith("/CALL_REQUEST "):
                     parts = line.split(" ")
@@ -121,7 +111,6 @@ def receive_messages(sock: socket.socket, stop_event: threading.Event, server_ip
                     init_udp_session(server_ip, server_udp_port, client_username, "")
                     start_audio_stream()
                     continue
-
                 # --- 处理会议室相关信令 ---
                 elif line.startswith("/ROOM_CREATED "):
                     parts = line.split(" ")
@@ -134,7 +123,6 @@ def receive_messages(sock: socket.socket, stop_event: threading.Event, server_ip
                     set_mute(True)
                     start_audio_stream()  # 必须启动流才能收到别人的声音
                     continue
-
                 elif line.startswith("/ROOM_JOINED "):
                     parts = line.split(" ")
                     room_id = parts[1]
@@ -146,7 +134,6 @@ def receive_messages(sock: socket.socket, stop_event: threading.Event, server_ip
                     set_mute(True)
                     start_audio_stream()  # 同上，确保接收线程能正常运行并播放
                     continue
-
                 elif line.startswith("/ROOM_MEMBERS "):
                     parts = line.split(" ", 2)
                     if len(parts) >= 3:
@@ -193,7 +180,6 @@ def receive_messages(sock: socket.socket, stop_event: threading.Event, server_ip
             
             if need_prompt:
                 print("你> ", end="", flush=True)
-
         except ConnectionResetError:
             print("\n[系统] 连接被服务器重置")
             stop_event.set()
@@ -203,12 +189,9 @@ def receive_messages(sock: socket.socket, stop_event: threading.Event, server_ip
         except Exception as e:
             # 数据量过大一次没接完等异常先忽略
             pass
-
-
 def start_client():
     """
     启动 TCP 客户端
-
     步骤：
       1. 用户输入服务器 IP 和端口
       2. 建立 TCP 连接
@@ -220,29 +203,23 @@ def start_client():
     print("  局域网聊天客户端")
     print("=" * 50)
     print(get_audio_backend_notice())
-
     global client_username
-
     # ---- 获取连接信息 ----
     # server_ip = "DESKTOP-4AFQ0JR" # 使用我的计算机名来作为服务器 就不用担心局域网内 IP 地址变化了 你们要改成你们自己的hostname 或者直接输入局域网 IP 地址
     # server_ip = "10.198.51.210" #蒋利伟主机名"desktop_m2mi6se8"
     server_ip = DEFAULT_SERVER_IP
     port = SERVER_TCP_PORT
-
     # 尝试将主机名解析为 IP 地址（支持 hostname 和 IP 两种输入）
     try:
         server_ip = socket.gethostbyname(server_ip)
     except socket.gaierror:
         print(f"[警告] 无法解析主机名 '{server_ip}'，将直接尝试连接...")
-
     username = input("请输入你的用户名: ").strip()
     if not username:
         username = "匿名用户"
     client_username = username
-
     # ---- 创建并连接 Socket ----
     client_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-
     try:
         print(f"\n正在连接 {server_ip}:{port} ...")
         client_sock.connect((server_ip, port))
@@ -253,10 +230,8 @@ def start_client():
     except Exception as e:
         print(f"[错误] 连接失败: {e}")
         sys.exit(1)
-
     # ---- 发送用户名完成注册 ----
     client_sock.sendall(username.encode(ENCODING))
-
     # ---- 启动接收线程 ----
     stop_event = threading.Event()
     recv_thread = threading.Thread(
@@ -265,7 +240,6 @@ def start_client():
         daemon=True
     )
     recv_thread.start()
-
     # ---- 主线程：发送消息 ----
     global current_room_id
     print("提示: 输入文字回车发送\n /voice 语音留言 \n /call @用户 实时语音 \n /contacts 管理通讯录 \n /status 查看联系人状态 \n /help 查看完整帮助 \n /quit 退出")
@@ -277,7 +251,6 @@ def start_client():
             msg = input()
             if not msg: # 如果用户直接按回车，输入为空字符串，就继续下一轮循环，等待有效输入
                 continue
-
             # ---- 本地查看联系人在线状态 ----
             if msg.lower() == "/status":
                 if not contact_status:
@@ -288,7 +261,6 @@ def start_client():
                         hint = "在线" if status == "online" else "离线"
                         print(f"  - {name} [{hint}]")
                 continue
-
             # ---- 帮助菜单 ----
             elif msg.lower() == "/help":
                 print("\n" + "=" * 50)
@@ -322,7 +294,6 @@ def start_client():
                 print("  /quit               → 退出客户端")
                 print("=" * 50 + "\n")
                 continue
-
             # ---- 处理录音指令 ----
             if "/voice" in msg.lower():
                 record_audio()  # 录制音频成 wav 格式临时文件
@@ -338,7 +309,6 @@ def start_client():
                 # @tuoliyuan /voice 
                 msg = f"{msg.split(sep = '/voice')[0]}AUDIO:{b64_string}"  # string has member function encode() but bytes doesn't, could receive para like "utf-8" or "ascii" to specify how to encode the string into bytes
                 # become    @tuoliyuan AUDIO:xxxxxx
-
             # ---- 处理呼叫答复 ----
             if msg.startswith("/accept "):
                 caller = msg.split(" ")[1]
@@ -361,7 +331,6 @@ def start_client():
                 client_sock.sendall(f"/CALL_REJECT {caller}".encode(ENCODING))
                 print(f"[系统] 已拒绝 {caller} 的呼叫。")
                 continue
-
             # ---- 处理会议室控制指令 ----
             elif msg.lower().startswith("/room_create"):
                 if current_room_id:
@@ -401,7 +370,6 @@ def start_client():
                     client_sock.sendall("/ROOM_QUIT".encode(ENCODING))
                 close_udp_session()  # 关闭本地 UDP 语音（内部包含 stop_audio_stream）
                 continue
-
             elif msg.lower().startswith("/open_voice"):
                 if not current_room_id:
                     print("[系统] 您当前不在会议室中，无法开启语音。")
@@ -409,7 +377,6 @@ def start_client():
                 set_mute(False)  # 仅需解除静音，底层发送线程已经运行，只需放行数据
                 client_sock.sendall(msg.encode(ENCODING))
                 continue
-
             elif msg.lower().startswith("/close_voice"):
                 if not current_room_id:
                     print("[系统] 您当前不在会议室中。")
@@ -417,7 +384,6 @@ def start_client():
                 set_mute(True)  # 仅需开启静音，保留接收线程和扬声器工作
                 client_sock.sendall(msg.encode(ENCODING))
                 continue
-
             elif msg.lower() == "/eval_start":
                 report_path, csv_path = start_evaluation(
                     interval_sec=1.0,
@@ -426,7 +392,6 @@ def start_client():
                 print(f"[系统] 网络音频质量测评已开始：每秒反馈一次，实时数据写入 {csv_path}")
                 print(f"[系统] 汇总报告将保存到 {report_path}")
                 continue
-
             elif msg.lower() == "/eval_stop":
                 report = stop_evaluation()
                 if report:
@@ -448,7 +413,6 @@ def start_client():
                 else:
                     print("[系统] 测评未在进行中")
                 continue
-
             elif msg.lower() == "/realtime -quit":
                 # 如果在会议室中，需要通知服务器退出房间
                 if current_room_id:
@@ -459,17 +423,14 @@ def start_client():
                 close_udp_session()   # 销毁 UDP 套接字释放端口
                 current_room_id = ""
                 # 会交给服务器去广播结束消息
-
             # 普通文本消息，直接发
             client_sock.sendall(msg.encode(ENCODING))
-
             if msg.lower() == "/quit":
                 # 退出前清理所有音频资源（无论是会议室还是1对1通话）
                 close_udp_session()
                 current_room_id = ""
                 print("[系统] 正在退出...")
                 break
-
     except (KeyboardInterrupt, EOFError):
         print("\n[系统] 正在退出...")
     finally:
@@ -479,7 +440,5 @@ def start_client():
         stop_event.set()
         client_sock.close()
         print("[系统] 已断开连接")
-
-
 if __name__ == "__main__":
     start_client()
